@@ -201,35 +201,35 @@ Shortcut
 
 Load Image
 
-Ctrl + O`
+Ctrl + O
 
 Process Image
 
-Ctrl + P`
+Ctrl + P
 
 YOLO Scan
 
-Ctrl + Y`
+Ctrl + Y
 
 Export SVG (2D)
 
-Ctrl + E`
+Ctrl + E
 
 Export STL (3D)
 
-Ctrl + Shift + E`
+Ctrl + Shift + E
 
 Clear Palette
 
-Ctrl + R`
+Ctrl + R
 
 Resort Palette
 
-Ctrl + S`
+Ctrl + S
 
 Configuration
 
-Ctrl + ,`
+Ctrl + ,
 
 ## Configuration Settings
 
