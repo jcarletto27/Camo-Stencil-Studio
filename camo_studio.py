@@ -70,7 +70,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v18 - Extended Layers")
+        self.root.title("Camo Studio v19 - Shortcuts")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -103,19 +103,31 @@ class CamoStudioApp:
         self.preview_images = {}
 
         self._create_ui()
+        self._bind_shortcuts()
+
+    def _bind_shortcuts(self):
+        """Register keyboard shortcuts"""
+        self.root.bind("<Control-o>", self.load_image)
+        self.root.bind("<Control-p>", self.trigger_process)
+        self.root.bind("<Control-y>", self.yolo_scan)
+        self.root.bind("<Control-e>", self.export_bundle_2d)
+        self.root.bind("<Control-E>", self.open_3d_export_window) # Shift+E
+        self.root.bind("<Control-r>", self.reset_picks)
+        self.root.bind("<Control-s>", lambda e: [self.reorder_palette_by_similarity(), self.update_pick_ui()])
+        self.root.bind("<Control-comma>", self.open_config_window)
 
     def _create_ui(self):
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Load Base Image", command=self.load_image)
-        file_menu.add_command(label="Export SVG Bundle (2D)", command=self.export_bundle_2d)
-        file_menu.add_command(label="Export STL Models (3D)", command=self.open_3d_export_window)
+        file_menu.add_command(label="Load Base Image (Ctrl+O)", command=self.load_image)
+        file_menu.add_command(label="Export SVG Bundle (Ctrl+E)", command=self.export_bundle_2d)
+        file_menu.add_command(label="Export STL Models (Ctrl+Shift+E)", command=self.open_3d_export_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.root.quit)
         menubar.add_cascade(label="File", menu=file_menu)
         
         prop_menu = tk.Menu(menubar, tearoff=0)
-        prop_menu.add_command(label="Configuration", command=self.open_config_window)
+        prop_menu.add_command(label="Configuration (Ctrl+,)", command=self.open_config_window)
         menubar.add_cascade(label="Properties", menu=prop_menu)
         self.root.config(menu=menubar)
 
@@ -207,7 +219,7 @@ class CamoStudioApp:
         self.lbl_status = tk.Label(self.root, text="Ready.", anchor="w")
         self.lbl_status.pack(side=tk.BOTTOM, fill=tk.X)
 
-    def open_config_window(self):
+    def open_config_window(self, event=None):
         top = tk.Toplevel(self.root)
         top.title("Properties")
         top.geometry("600x500")
@@ -229,7 +241,7 @@ class CamoStudioApp:
         tk.Button(top, text="Close", command=top.destroy).pack(pady=10)
 
     # --- 3D CONFIG WINDOW ---
-    def open_3d_export_window(self):
+    def open_3d_export_window(self, event=None):
         if not self.processed_data:
             messagebox.showwarning("No Data", "Process an image first.")
             return
@@ -272,7 +284,7 @@ class CamoStudioApp:
         self.progress_var.set(0)
         threading.Thread(target=self.export_3d_thread, args=(target_dir,)).start()
 
-    def load_image(self):
+    def load_image(self, event=None):
         path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
         if not path: return
         self.original_image_path = path
@@ -292,7 +304,7 @@ class CamoStudioApp:
         self.lbl_status.config(text="Image loaded.")
 
     # --- YOLO MODE ---
-    def yolo_scan(self):
+    def yolo_scan(self, event=None):
         if self.cv_original_full is None: 
             messagebox.showinfo("Info", "Load an image first.")
             return
@@ -430,7 +442,7 @@ class CamoStudioApp:
             self.update_pick_ui()
             self.lbl_status.config(text=f"Color removed. Total: {len(self.picked_colors)}")
 
-    def reset_picks(self):
+    def reset_picks(self, event=None):
         self.picked_colors = []
         self.layer_vars = []
         self.select_vars = []
@@ -504,7 +516,7 @@ class CamoStudioApp:
             spin = tk.Spinbox(f, from_=1, to=999, width=4, textvariable=var, font=("Arial", 10))
             spin.pack(side=tk.RIGHT, padx=5)
 
-    def trigger_process(self):
+    def trigger_process(self, event=None):
         if self.cv_original_full is None: return
         self.lbl_status.config(text="Processing...")
         self.progress['mode'] = 'indeterminate'
@@ -653,7 +665,7 @@ class CamoStudioApp:
         canvas = AutoResizingCanvas(frame, pil_image=pil_image, bg="#333", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
 
-    def export_bundle_2d(self):
+    def export_bundle_2d(self, event=None):
         if not self.processed_data: return
         target_dir = filedialog.askdirectory()
         if not target_dir: return

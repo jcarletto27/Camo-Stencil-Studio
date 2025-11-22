@@ -9,6 +9,9 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 ### Color & Palette Management
 
 
+- **YOLO Mode (Auto-Detect):** One-click scanning that intelligently detects all dominant colors in an image and sorts them by visual similarity for you.
+
+
 - **Hybrid Color Detection:** Use automatic K-Means quantization to find dominant colors, or manually click the canvas to pick specific target colors.
 
 
@@ -91,26 +94,26 @@ This project includes automated setup scripts to handle Python Virtual Environme
 
 1. Make the scripts executable:
 
-```
+``
 chmod +x setup_linux.sh run.sh   
 
-```
+``
 
 
 1. Run the setup:
 
-```
+``
 ./setup_linux.sh   
 
-```
+``
 
 
 1. Launch the application:
 
-```
+``
 ./run.sh   
 
-```
+``
 
 
 
@@ -122,10 +125,13 @@ chmod +x setup_linux.sh run.sh
 - Go to **File > Load Base Image** and select a reference image (JPG, PNG, BMP).
 
 
-- **Manual Mode:** Click anywhere on the image to add that color to your Palette Sidebar. The list will automatically sort itself to keep similar colors together.
+- **YOLO Mode (Recommended):** Click the orange **YOLO Scan** button. It will find the best colors, sort them by similarity, and assign them layer numbers automatically.
 
 
-- **Auto Mode:** If you don't pick any colors, the app will automatically calculate the average dominant colors based on the "Max Colors" setting.
+- **Manual Mode:** Click anywhere on the image to add that color to your Palette Sidebar.
+
+
+- **Auto Mode:** If you don't pick any colors (and don't use YOLO), the app will automatically calculate the average dominant colors based on the "Max Colors" setting.
 
 
 
@@ -187,13 +193,51 @@ chmod +x setup_linux.sh run.sh
 
 
 
+### Keyboard Shortcuts
+
+Action
+
+Shortcut
+
+Load Image
+
+Ctrl + O`
+
+Process Image
+
+Ctrl + P`
+
+YOLO Scan
+
+Ctrl + Y`
+
+Export SVG (2D)
+
+Ctrl + E`
+
+Export STL (3D)
+
+Ctrl + Shift + E`
+
+Clear Palette
+
+Ctrl + R`
+
+Resort Palette
+
+Ctrl + S`
+
+Configuration
+
+Ctrl + ,`
+
 ## Configuration Settings
 
 Access these via **Properties > Configuration**:
 
-**Setting**
+Setting
 
-**Description**
+Description
 
 **Max Color Count**
 
@@ -219,17 +263,17 @@ customize output names. Variables: `%INPUTFILENAME%`, `%COLOR%`, `%INDEX%`.
 
 If installing manually (without the scripts), these are the required Python libraries:
 
-```
+``
 opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
 
-```
+``
 
 You can install them via:
 
-```
+``
 pip install opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
 
-```
+``
 
 ## License
 
