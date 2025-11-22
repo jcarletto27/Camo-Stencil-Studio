@@ -15,7 +15,10 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 - **Layer Merging:** Assign multiple distinct colors to a single "Layer ID". This allows you to merge different shades (e.g., "Forest Green" and "Dark Green") into a single physical stencil layer.
 
 
-- **Smart Palette Sidebar:** * Visual swatches with Hex codes.
+- **Smart Palette Sidebar:**
+
+
+- Visual swatches with Hex codes.
 
 
 - Duplicate prevention (prevents adding the same color twice).
@@ -121,7 +124,7 @@ This project includes automated setup scripts to handle Python Virtual Environme
 ### 1. Load & Pick
 
 
-- Go to **File** > Load Base** Image** and select a reference image (JPG, PNG, BMP).
+- Go to **File > Load Base Image** and select a reference image (JPG, PNG, BMP).
 
 
 - **Manual Mode:** Click anywhere on the image to add that color to your Palette Sidebar.
@@ -163,7 +166,7 @@ This project includes automated setup scripts to handle Python Virtual Environme
 ### 4. Export
 
 
-- **2D:** Go to **File** > Export SVG** Bundle**. Select a folder, and it will generate `layer_1.svg`, `layer_2.svg`, etc.
+- **2D:** Go to **File > Export SVG Bundle**. Select a folder, and it will generate `layer_1.svg`, `layer_2.svg`, etc.
 
 
 - **3D:** Go to **File > Export STL Models**.
@@ -218,6 +221,10 @@ If installing manually (without the scripts), these are the required Python libr
 You can install them via:
 
 ```
-`pip install opencv-python numpy svgwrite Pillow trimesh shapely   
+`pip install opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
 `
 ```
+
+## 📝 License
+
+This project is provided as-is for personal and educational use.
