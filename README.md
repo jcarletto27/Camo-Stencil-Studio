@@ -97,24 +97,24 @@ This project includes automated setup scripts to handle Python Virtual Environme
 1. Make the scripts executable:
 
 ```
-`chmod +x setup_linux.sh run.sh   
-`
+chmod +x setup_linux.sh run.sh   
+
 ```
 
 
 1. Run the setup:
 
 ```
-`./setup_linux.sh   
-`
+./setup_linux.sh   
+
 ```
 
 
 1. Launch the application:
 
 ```
-`./run.sh   
-`
+./run.sh   
+
 ```
 
 
@@ -214,17 +214,13 @@ customize output names. Variables: `%INPUTFILENAME%`, `%COLOR%`, `%INDEX%`.
 If installing manually (without the scripts), these are the required Python libraries:
 
 ```
-`opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
-`
+opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
+
 ```
 
 You can install them via:
 
 ```
-`pip install opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
-`
+pip install opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
+
 ```
-
-## 📝 License
-
-This project is provided as-is for personal and educational use.
