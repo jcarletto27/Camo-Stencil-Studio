@@ -70,7 +70,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v14 - Bulk Layer Management")
+        self.root.title("Camo Studio v18 - Extended Layers")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -141,21 +141,58 @@ class CamoStudioApp:
         self.swatch_sidebar.pack(side=tk.LEFT, fill="y")
         self.swatch_sidebar.pack_propagate(False) 
         
-        # Swatch List
-        self.swatch_list_frame = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
-        self.swatch_list_frame.pack(fill="both", expand=True)
-        
-        # Bulk Action Area (Bottom of sidebar)
-        self.bulk_frame = tk.Frame(self.swatch_sidebar, bg="#e0e0e0", padx=5, pady=5, height=80)
+        # Sidebar Tools (YOLO) - TOP
+        self.sidebar_tools = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
+        self.sidebar_tools.pack(side=tk.TOP, fill="x", pady=(0, 5))
+        tk.Button(self.sidebar_tools, text="YOLO Scan (Auto-Detect)", command=self.yolo_scan, 
+                  bg="#FF9800", fg="white", font=("Arial", 9, "bold")).pack(fill="x", padx=5)
+
+        # Bulk Action Area (Bottom of sidebar) - Pack BEFORE list to ensure it sticks to bottom
+        self.bulk_frame = tk.Frame(self.swatch_sidebar, bg="#e0e0e0", padx=5, pady=5)
         self.bulk_frame.pack(side=tk.BOTTOM, fill="x")
         
-        tk.Label(self.bulk_frame, text="Bulk Assign:", bg="#e0e0e0", font=("Arial", 8, "bold")).pack(anchor="w")
+        # Bulk Header with Clear Button
+        bf_header = tk.Frame(self.bulk_frame, bg="#e0e0e0")
+        bf_header.pack(fill="x", pady=(0,2))
+        tk.Label(bf_header, text="Bulk Assign:", bg="#e0e0e0", font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        tk.Button(bf_header, text="Clear List", command=self.reset_picks, bg="#ffdddd", font=("Arial", 7)).pack(side=tk.RIGHT)
+
         bf_inner = tk.Frame(self.bulk_frame, bg="#e0e0e0")
         bf_inner.pack(fill="x", pady=2)
-        
         tk.Label(bf_inner, text="Sel. to Layer:", bg="#e0e0e0", font=("Arial", 8)).pack(side=tk.LEFT)
-        tk.Spinbox(bf_inner, from_=1, to=20, width=3, textvariable=self.bulk_target_layer).pack(side=tk.LEFT, padx=5)
+        
+        # Updated Limit to 999
+        tk.Spinbox(bf_inner, from_=1, to=999, width=4, textvariable=self.bulk_target_layer).pack(side=tk.LEFT, padx=5)
         tk.Button(bf_inner, text="Apply", command=self.apply_bulk_layer, bg="#ccc", font=("Arial", 8)).pack(side=tk.LEFT)
+
+        # Swatch List (Scrollable) - MIDDLE (Expands)
+        self.swatch_container = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
+        self.swatch_container.pack(side=tk.LEFT, fill="both", expand=True)
+        
+        self.swatch_canvas = tk.Canvas(self.swatch_container, bg="#f0f0f0", highlightthickness=0)
+        self.swatch_scrollbar = ttk.Scrollbar(self.swatch_container, orient="vertical", command=self.swatch_canvas.yview)
+        
+        self.swatch_list_frame = tk.Frame(self.swatch_canvas, bg="#f0f0f0")
+        
+        # Bind configuration to update scroll region
+        self.swatch_list_frame.bind("<Configure>", lambda e: self.swatch_canvas.configure(scrollregion=self.swatch_canvas.bbox("all")))
+        
+        self.swatch_window = self.swatch_canvas.create_window((0, 0), window=self.swatch_list_frame, anchor="nw")
+        
+        # Configure canvas width to match frame width on resize
+        self.swatch_canvas.bind("<Configure>", lambda e: self.swatch_canvas.itemconfig(self.swatch_window, width=e.width))
+        
+        self.swatch_canvas.configure(yscrollcommand=self.swatch_scrollbar.set)
+        
+        self.swatch_scrollbar.pack(side=tk.RIGHT, fill="y")
+        self.swatch_canvas.pack(side=tk.LEFT, fill="both", expand=True)
+        
+        # Mousewheel scrolling
+        def _on_mousewheel(event):
+            self.swatch_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        
+        # Bind mousewheel to canvas and children
+        self.swatch_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         self.canvas_frame = tk.Frame(self.input_container, bg="#333")
         self.canvas_frame.pack(side=tk.LEFT, fill="both", expand=True)
@@ -254,6 +291,49 @@ class CamoStudioApp:
         self.reset_picks()
         self.lbl_status.config(text="Image loaded.")
 
+    # --- YOLO MODE ---
+    def yolo_scan(self):
+        if self.cv_original_full is None: 
+            messagebox.showinfo("Info", "Load an image first.")
+            return
+            
+        if self.picked_colors:
+            if not messagebox.askyesno("YOLO Mode", "This will replace your current palette. Continue?"):
+                return
+
+        self.picked_colors = []
+        self.layer_vars = []
+        self.select_vars = []
+        
+        img = self.cv_original_full.copy()
+        max_analysis_w = 300 
+        h, w = img.shape[:2]
+        if w > max_analysis_w:
+            scale = max_analysis_w / w
+            img = cv2.resize(img, (max_analysis_w, int(h * scale)), interpolation=cv2.INTER_AREA)
+            
+        data = img.reshape((-1, 3)).astype(np.float32)
+        
+        unique_colors = np.unique(data.astype(np.uint8), axis=0)
+        final_colors = []
+        
+        if len(unique_colors) <= 64:
+            print(f"YOLO: Found {len(unique_colors)} unique colors. Using Exact.")
+            final_colors = [tuple(c) for c in unique_colors]
+        else:
+            print(f"YOLO: Too many colors ({len(unique_colors)}). Quantizing to 32.")
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+            ret, label, center = cv2.kmeans(data, 32, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+            center = np.uint8(center)
+            final_colors = [tuple(c) for c in center]
+            
+        self.picked_colors = final_colors
+        
+        # Apply sorting and renumbering
+        self.reorder_palette_by_similarity()
+        self.update_pick_ui()
+        self.lbl_status.config(text=f"YOLO Mode: Scanned {len(self.picked_colors)} dominant colors.")
+
     def on_canvas_click(self, event):
         if self.cv_original_full is None: return
         coords = self.main_canvas.get_image_coordinates(event.x, event.y)
@@ -262,17 +342,14 @@ class CamoStudioApp:
             if y < self.cv_original_full.shape[0] and x < self.cv_original_full.shape[1]:
                 bgr_color = self.cv_original_full[y, x]
                 
-                # Check duplicates
                 bgr_tuple = tuple(bgr_color)
                 if bgr_tuple in self.picked_colors:
                     self.lbl_status.config(text="Color already in palette.")
                     return
                 
-                # Add color
                 self.picked_colors.append(bgr_tuple)
                 
-                # NOTE: Sorting reorders everything, so we handle init there.
-                # We trigger the reorder which will initialize missing vars
+                # Reorder will handle creating the layer vars and sorting
                 self.reorder_palette_by_similarity()
                 
                 self.update_pick_ui()
@@ -280,48 +357,66 @@ class CamoStudioApp:
 
     def reorder_palette_by_similarity(self):
         """
-        Sorts colors by similarity. Preserves layer assignments if they exist.
-        Initializes new layers for new colors.
+        Sorts:
+        1. Layer Groups by Brightness (Lightest -> Darkest)
+        2. Colors within groups by Brightness
+        3. Renumbers layers sequentially 1..N
         """
         if not self.picked_colors: return
         
-        # Ensure we have vars for every color (handle new additions)
+        # 1. Ensure vars exist
         while len(self.layer_vars) < len(self.picked_colors):
-             # Default to next available ID
              existing_ids = [v.get() for v in self.layer_vars]
              next_id = max(existing_ids) + 1 if existing_ids else 1
              self.layer_vars.append(tk.IntVar(value=next_id))
-        
         while len(self.select_vars) < len(self.picked_colors):
              self.select_vars.append(tk.BooleanVar(value=False))
 
-        # Helper: Euclidean distance
-        def dist(c1, c2): return sum((a-b)**2 for a, b in zip(c1, c2))
-
-        # Bundle
-        pool = []
-        for i in range(len(self.picked_colors)):
-            pool.append({
-                'color': self.picked_colors[i],
-                'layer': self.layer_vars[i],
+        # 2. Group Data
+        groups = {}
+        for i, color in enumerate(self.picked_colors):
+            lid = self.layer_vars[i].get()
+            if lid not in groups: groups[lid] = []
+            groups[lid].append({
+                'color': color,
+                'var': self.layer_vars[i],
                 'select': self.select_vars[i]
             })
+
+        # 3. Sort Groups (Light -> Dark)
+        # Calculate average brightness of each group
+        group_metrics = []
+        for lid, items in groups.items():
+            avg_b = np.mean([sum(x['color']) for x in items])
+            group_metrics.append({'lid': lid, 'brightness': avg_b, 'items': items})
         
-        # Sort Logic
-        pool.sort(key=lambda x: sum(x['color'])) 
-        current_item = pool.pop(0)
-        new_order = [current_item]
+        # Sort Descending (Higher BGR sum = Lighter)
+        group_metrics.sort(key=lambda x: x['brightness'], reverse=True)
+
+        # 4. Flatten and Renumber
+        new_colors = []
+        new_layer_vars = []
+        new_select_vars = []
         
-        while pool:
-            nearest_item = min(pool, key=lambda x: dist(x['color'], current_item['color']))
-            new_order.append(nearest_item)
-            current_item = nearest_item
-            pool.remove(nearest_item)
+        current_layer_num = 1
+        
+        for g in group_metrics:
+            # Sort items INSIDE the group by brightness (Light -> Dark)
+            items = g['items']
+            items.sort(key=lambda x: sum(x['color']), reverse=True)
             
-        # Unpack
-        self.picked_colors = [x['color'] for x in new_order]
-        self.layer_vars = [x['layer'] for x in new_order]
-        self.select_vars = [x['select'] for x in new_order]
+            for item in items:
+                new_colors.append(item['color'])
+                # Assign NEW sequential layer number
+                new_layer_vars.append(tk.IntVar(value=current_layer_num))
+                new_select_vars.append(item['select'])
+            
+            current_layer_num += 1
+
+        # 5. Apply
+        self.picked_colors = new_colors
+        self.layer_vars = new_layer_vars
+        self.select_vars = new_select_vars
 
     def remove_color(self, index):
         if 0 <= index < len(self.picked_colors):
@@ -352,7 +447,7 @@ class CamoStudioApp:
             if var.get():
                 self.layer_vars[i].set(target)
                 changed = True
-                var.set(False) # Deselect after applying
+                var.set(False) 
         
         if changed:
             self.compact_layer_ids()
@@ -377,7 +472,6 @@ class CamoStudioApp:
             tk.Label(self.swatch_list_frame, text="Auto-Mode", bg="#f0f0f0").pack(pady=10)
             return
         
-        # Header
         h_frame = tk.Frame(self.swatch_list_frame, bg="#f0f0f0")
         h_frame.pack(fill="x", pady=2)
         tk.Label(h_frame, text="Sel", bg="#f0f0f0", font=("Arial", 7)).pack(side=tk.LEFT, padx=2)
@@ -386,7 +480,6 @@ class CamoStudioApp:
         btn_sort.pack(side=tk.RIGHT, padx=2)
         tk.Label(h_frame, text="Layer #", bg="#f0f0f0", font=("Arial", 8, "bold")).pack(side=tk.RIGHT, padx=2)
 
-        # Render List
         for i, bgr in enumerate(self.picked_colors):
             var = self.layer_vars[i]
             sel_var = self.select_vars[i]
@@ -397,21 +490,18 @@ class CamoStudioApp:
             f.pack(fill="x", padx=5, pady=2)
             f.pack_propagate(False) 
             
-            # Checkbox
             chk = tk.Checkbutton(f, variable=sel_var, bg=hex_c, activebackground=hex_c)
             chk.pack(side=tk.LEFT, padx=2)
 
-            # Delete
             btn_del = tk.Label(f, text="X", bg="red", fg="white", font=("Arial", 8, "bold"), width=3)
             btn_del.pack(side=tk.LEFT, fill="y")
             btn_del.bind("<Button-1>", lambda e, idx=i: self.remove_color(idx))
             
-            # Color Label
             lbl = tk.Label(f, text=hex_c, bg=hex_c, fg=fg, font=("Consolas", 9, "bold"))
             lbl.pack(side=tk.LEFT, expand=True)
             
-            # Layer Spinbox
-            spin = tk.Spinbox(f, from_=1, to=20, width=3, textvariable=var, font=("Arial", 10))
+            # Updated Limit to 999
+            spin = tk.Spinbox(f, from_=1, to=999, width=4, textvariable=var, font=("Arial", 10))
             spin.pack(side=tk.RIGHT, padx=5)
 
     def trigger_process(self):
