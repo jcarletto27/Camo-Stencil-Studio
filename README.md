@@ -4,33 +4,28 @@
 
 It bridges the gap between 2D image processing and physical fabrication, allowing users to create multi-layer spray paint stencils or solid 3D camouflage geometry from photographs or reference images.
 
-## 🌟 Key Features
+## Key Features
 
-### 🎨 Color & Palette Management
+### Color & Palette Management
 
 
 - **Hybrid Color Detection:** Use automatic K-Means quantization to find dominant colors, or manually click the canvas to pick specific target colors.
 
 
-- **Layer Merging:** Assign multiple distinct colors to a single "Layer ID". This allows you to merge different shades (e.g., "Forest Green" and "Dark Green") into a single physical stencil layer.
+- **Smart Palette Sorting:** Colors are automatically sorted by visual similarity (Nearest Neighbor algorithm), creating smooth gradients in your list to make layer organization easier.
 
 
-- **Smart Palette Sidebar:**
+- **Bulk Layer Management:** Use checkboxes to select multiple colors and assign them to a single layer instantly.
 
 
-- Visual swatches with Hex codes.
+- **Auto-Renumbering:** The app automatically compacts layer numbers (e.g., 1, 3, 5 → 1, 2, 3) to ensure a clean, sequential output without gaps.
 
 
-- Duplicate prevention (prevents adding the same color twice).
-
-
-- Manual sorting and removing of colors.
+- **Duplicate Prevention:** Automatically detects and prevents adding the same color twice.
 
 
 
-
-
-### 🛠 Image Processing
+### Image Processing
 
 
 - **Smart Denoising:** Configurable Gaussian blur and Morphological operations to smooth out jagged pixel noise before vectorization.
@@ -43,7 +38,7 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 
 
 
-### 📂 2D Export (Vector)
+### 2D Export (Vector)
 
 
 - **SVG Bundles:** Exports each color layer as a separate, clean SVG file.
@@ -53,7 +48,7 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 
 
 
-### 🧊 3D Export (STL)
+### 3D Export (STL)
 
 
 - **Computational Geometry:** Converts 2D contours into 3D meshes using triangulation.
@@ -69,7 +64,7 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 
 
 
-## 🚀 Installation & Setup
+## Installation & Setup
 
 This project includes automated setup scripts to handle Python Virtual Environments and dependencies.
 
@@ -119,7 +114,7 @@ chmod +x setup_linux.sh run.sh
 
 
 
-## 📖 Usage Guide
+## Usage Guide
 
 ### 1. Load & Pick
 
@@ -127,7 +122,7 @@ chmod +x setup_linux.sh run.sh
 - Go to **File > Load Base Image** and select a reference image (JPG, PNG, BMP).
 
 
-- **Manual Mode:** Click anywhere on the image to add that color to your Palette Sidebar.
+- **Manual Mode:** Click anywhere on the image to add that color to your Palette Sidebar. The list will automatically sort itself to keep similar colors together.
 
 
 - **Auto Mode:** If you don't pick any colors, the app will automatically calculate the average dominant colors based on the "Max Colors" setting.
@@ -140,13 +135,24 @@ chmod +x setup_linux.sh run.sh
 - Look at the **Palette Sidebar** on the left.
 
 
-- Each color has a **Layer #**.
+- **Single Edit:** Use the spinner next to any color to change its **Layer #**.
 
 
-- If you want two different colors to end up on the same stencil, change their Layer # to match (e.g., set both Brown and Tan to Layer 1).
+- **Bulk Edit:**
 
 
-- Click the **Sort** button to organize the list.
+1. Check the boxes next to the colors you want to group (e.g., three shades of green).
+
+
+1. Look at the **Bulk Assign** panel at the bottom of the sidebar.
+
+
+1. Set the target layer number and click **Apply**.
+
+
+
+
+- **Resort:** Click the **Resort** button to re-organize the list by visual similarity if things get messy.
 
 
 
@@ -181,13 +187,13 @@ chmod +x setup_linux.sh run.sh
 
 
 
-## ⚙️ Configuration Settings
+## Configuration Settings
 
 Access these via **Properties > Configuration**:
 
-Setting
+**Setting**
 
-Description
+**Description**
 
 **Max Color Count**
 
@@ -209,7 +215,7 @@ Downscales input images to this width to speed up processing. Default is 1000px.
 
 customize output names. Variables: `%INPUTFILENAME%`, `%COLOR%`, `%INDEX%`.
 
-## 📦 Requirements
+## Requirements
 
 If installing manually (without the scripts), these are the required Python libraries:
 
@@ -224,3 +230,7 @@ You can install them via:
 pip install opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut   
 
 ```
+
+## License
+
+This project is provided as-is for personal and educational use.

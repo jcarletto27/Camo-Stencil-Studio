@@ -70,7 +70,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v12 - Sorted Layers")
+        self.root.title("Camo Studio v14 - Bulk Layer Management")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -95,7 +95,9 @@ class CamoStudioApp:
         
         # State
         self.picked_colors = [] 
-        self.layer_vars = []    
+        self.layer_vars = []
+        self.select_vars = [] # Checkboxes
+        self.bulk_target_layer = tk.IntVar(value=1)
         
         self.processed_data = None 
         self.preview_images = {}
@@ -134,12 +136,26 @@ class CamoStudioApp:
         self.input_container = tk.Frame(self.tab_main)
         self.input_container.pack(fill="both", expand=True)
 
-        # Sidebar
-        self.swatch_sidebar = tk.Frame(self.input_container, width=220, bg="#f0f0f0", padx=5, pady=5)
+        # Sidebar (Wider for controls)
+        self.swatch_sidebar = tk.Frame(self.input_container, width=280, bg="#f0f0f0", padx=5, pady=5)
         self.swatch_sidebar.pack(side=tk.LEFT, fill="y")
         self.swatch_sidebar.pack_propagate(False) 
+        
+        # Swatch List
         self.swatch_list_frame = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
-        self.swatch_list_frame.pack(fill="x")
+        self.swatch_list_frame.pack(fill="both", expand=True)
+        
+        # Bulk Action Area (Bottom of sidebar)
+        self.bulk_frame = tk.Frame(self.swatch_sidebar, bg="#e0e0e0", padx=5, pady=5, height=80)
+        self.bulk_frame.pack(side=tk.BOTTOM, fill="x")
+        
+        tk.Label(self.bulk_frame, text="Bulk Assign:", bg="#e0e0e0", font=("Arial", 8, "bold")).pack(anchor="w")
+        bf_inner = tk.Frame(self.bulk_frame, bg="#e0e0e0")
+        bf_inner.pack(fill="x", pady=2)
+        
+        tk.Label(bf_inner, text="Sel. to Layer:", bg="#e0e0e0", font=("Arial", 8)).pack(side=tk.LEFT)
+        tk.Spinbox(bf_inner, from_=1, to=20, width=3, textvariable=self.bulk_target_layer).pack(side=tk.LEFT, padx=5)
+        tk.Button(bf_inner, text="Apply", command=self.apply_bulk_layer, bg="#ccc", font=("Arial", 8)).pack(side=tk.LEFT)
 
         self.canvas_frame = tk.Frame(self.input_container, bg="#333")
         self.canvas_frame.pack(side=tk.LEFT, fill="both", expand=True)
@@ -246,34 +262,112 @@ class CamoStudioApp:
             if y < self.cv_original_full.shape[0] and x < self.cv_original_full.shape[1]:
                 bgr_color = self.cv_original_full[y, x]
                 
-                # Check for duplicates
+                # Check duplicates
                 bgr_tuple = tuple(bgr_color)
                 if bgr_tuple in self.picked_colors:
                     self.lbl_status.config(text="Color already in palette.")
                     return
                 
-                # Add color and a new Layer ID (default to current count + 1)
-                self.picked_colors.append(bgr_tuple) 
-                new_layer_id = len(self.picked_colors) 
-                self.layer_vars.append(tk.IntVar(value=new_layer_id))
+                # Add color
+                self.picked_colors.append(bgr_tuple)
+                
+                # NOTE: Sorting reorders everything, so we handle init there.
+                # We trigger the reorder which will initialize missing vars
+                self.reorder_palette_by_similarity()
                 
                 self.update_pick_ui()
-                self.lbl_status.config(text=f"Color added. Total: {len(self.picked_colors)}")
+                self.lbl_status.config(text=f"Color added & sorted. Total: {len(self.picked_colors)}")
+
+    def reorder_palette_by_similarity(self):
+        """
+        Sorts colors by similarity. Preserves layer assignments if they exist.
+        Initializes new layers for new colors.
+        """
+        if not self.picked_colors: return
+        
+        # Ensure we have vars for every color (handle new additions)
+        while len(self.layer_vars) < len(self.picked_colors):
+             # Default to next available ID
+             existing_ids = [v.get() for v in self.layer_vars]
+             next_id = max(existing_ids) + 1 if existing_ids else 1
+             self.layer_vars.append(tk.IntVar(value=next_id))
+        
+        while len(self.select_vars) < len(self.picked_colors):
+             self.select_vars.append(tk.BooleanVar(value=False))
+
+        # Helper: Euclidean distance
+        def dist(c1, c2): return sum((a-b)**2 for a, b in zip(c1, c2))
+
+        # Bundle
+        pool = []
+        for i in range(len(self.picked_colors)):
+            pool.append({
+                'color': self.picked_colors[i],
+                'layer': self.layer_vars[i],
+                'select': self.select_vars[i]
+            })
+        
+        # Sort Logic
+        pool.sort(key=lambda x: sum(x['color'])) 
+        current_item = pool.pop(0)
+        new_order = [current_item]
+        
+        while pool:
+            nearest_item = min(pool, key=lambda x: dist(x['color'], current_item['color']))
+            new_order.append(nearest_item)
+            current_item = nearest_item
+            pool.remove(nearest_item)
+            
+        # Unpack
+        self.picked_colors = [x['color'] for x in new_order]
+        self.layer_vars = [x['layer'] for x in new_order]
+        self.select_vars = [x['select'] for x in new_order]
 
     def remove_color(self, index):
         if 0 <= index < len(self.picked_colors):
             del self.picked_colors[index]
             del self.layer_vars[index] 
+            del self.select_vars[index]
+            
+            # Re-compact IDs after removal to keep numbers clean
+            self.compact_layer_ids()
+            
             self.update_pick_ui()
             self.lbl_status.config(text=f"Color removed. Total: {len(self.picked_colors)}")
 
     def reset_picks(self):
         self.picked_colors = []
         self.layer_vars = []
+        self.select_vars = []
         self.update_pick_ui()
         if self.cv_original_full is not None:
             for tab in self.notebook.tabs():
                 if tab != str(self.tab_main): self.notebook.forget(tab)
+
+    # --- BULK ACTIONS ---
+    def apply_bulk_layer(self):
+        target = self.bulk_target_layer.get()
+        changed = False
+        for i, var in enumerate(self.select_vars):
+            if var.get():
+                self.layer_vars[i].set(target)
+                changed = True
+                var.set(False) # Deselect after applying
+        
+        if changed:
+            self.compact_layer_ids()
+            self.update_pick_ui()
+            self.lbl_status.config(text="Bulk assignment complete. Layers re-numbered.")
+        else:
+            messagebox.showinfo("Info", "No colors selected.")
+
+    def compact_layer_ids(self):
+        """Renumber layers to be continuous 1..N"""
+        current_ids = sorted(list(set(v.get() for v in self.layer_vars)))
+        id_map = {old: new+1 for new, old in enumerate(current_ids)}
+        
+        for var in self.layer_vars:
+            var.set(id_map[var.get()])
 
     def update_pick_ui(self):
         for widget in self.swatch_list_frame.winfo_children():
@@ -283,35 +377,19 @@ class CamoStudioApp:
             tk.Label(self.swatch_list_frame, text="Auto-Mode", bg="#f0f0f0").pack(pady=10)
             return
         
-        # --- HEADER WITH SORT BUTTON ---
+        # Header
         h_frame = tk.Frame(self.swatch_list_frame, bg="#f0f0f0")
         h_frame.pack(fill="x", pady=2)
+        tk.Label(h_frame, text="Sel", bg="#f0f0f0", font=("Arial", 7)).pack(side=tk.LEFT, padx=2)
         tk.Label(h_frame, text="Color", bg="#f0f0f0", font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=5)
-        
-        # Sort button to re-order after editing numbers
-        btn_sort = tk.Button(h_frame, text="Sort", command=self.update_pick_ui, font=("Arial", 7), padx=2, pady=0)
+        btn_sort = tk.Button(h_frame, text="Resort", command=lambda: [self.reorder_palette_by_similarity(), self.update_pick_ui()], font=("Arial", 7), padx=2, pady=0)
         btn_sort.pack(side=tk.RIGHT, padx=2)
         tk.Label(h_frame, text="Layer #", bg="#f0f0f0", font=("Arial", 8, "bold")).pack(side=tk.RIGHT, padx=2)
 
-        # --- SORT LOGIC ---
-        # Create a list of items with their Original Index
-        items = []
-        for i in range(len(self.picked_colors)):
-            items.append({
-                'orig_index': i,
-                'bgr': self.picked_colors[i],
-                'var': self.layer_vars[i]
-            })
-        
-        # Sort based on the IntVar value (Layer Number)
-        items.sort(key=lambda x: x['var'].get())
-
-        # --- RENDER SORTED LIST ---
-        for item in items:
-            i = item['orig_index']
-            bgr = item['bgr']
-            var = item['var']
-
+        # Render List
+        for i, bgr in enumerate(self.picked_colors):
+            var = self.layer_vars[i]
+            sel_var = self.select_vars[i]
             hex_c = bgr_to_hex(bgr)
             fg = "black" if is_bright(bgr) else "white"
             
@@ -319,14 +397,20 @@ class CamoStudioApp:
             f.pack(fill="x", padx=5, pady=2)
             f.pack_propagate(False) 
             
-            # Delete Button uses ORIGINAL index 'i' to delete correctly from main lists
+            # Checkbox
+            chk = tk.Checkbutton(f, variable=sel_var, bg=hex_c, activebackground=hex_c)
+            chk.pack(side=tk.LEFT, padx=2)
+
+            # Delete
             btn_del = tk.Label(f, text="X", bg="red", fg="white", font=("Arial", 8, "bold"), width=3)
             btn_del.pack(side=tk.LEFT, fill="y")
             btn_del.bind("<Button-1>", lambda e, idx=i: self.remove_color(idx))
             
+            # Color Label
             lbl = tk.Label(f, text=hex_c, bg=hex_c, fg=fg, font=("Consolas", 9, "bold"))
             lbl.pack(side=tk.LEFT, expand=True)
             
+            # Layer Spinbox
             spin = tk.Spinbox(f, from_=1, to=20, width=3, textvariable=var, font=("Arial", 10))
             spin.pack(side=tk.RIGHT, padx=5)
 
