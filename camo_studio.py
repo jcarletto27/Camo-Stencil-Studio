@@ -74,7 +74,7 @@ class CamoStudioApp:
         self.root.geometry("1200x850")
 
         self.config = {
-                "max_colors": tk.IntVar(value=DEFAULT_MAX_COLORS),
+            "max_colors": tk.IntVar(value=DEFAULT_MAX_COLORS),
             "max_width": tk.IntVar(value=DEFAULT_MAX_WIDTH),
             "denoise_strength": tk.IntVar(value=DEFAULT_DENOISE),
             "min_blob_size": tk.IntVar(value=DEFAULT_MIN_BLOB),
@@ -397,7 +397,7 @@ class CamoStudioApp:
             lid = self.layer_vars[i].get()
             if lid not in groups: groups[lid] = []
             groups[lid].append({
-                    'color': color,
+                'color': color,
                 'var': self.layer_vars[i],
                 'select': self.select_vars[i]
             })
@@ -630,7 +630,7 @@ class CamoStudioApp:
                 final_centers = raw_centers
 
             self.processed_data = {
-                    "centers": final_centers,
+                "centers": final_centers,
                 "masks": final_masks,
                 "width": w,
                 "height": h
@@ -834,7 +834,4 @@ class CamoStudioApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = CamoStudioApp(root)
-    root.mainloop())))
-            })
-            }))")")")
-        }
+    root.mainloop()
