@@ -5,6 +5,21 @@ echo "     CAMO STUDIO - LINUX SETUP WIZARD"
 echo "========================================================"
 echo ""
 
+# 0. Check for Updates
+echo "[*] Checking for Git..."
+if command -v git &> /dev/null; then
+    echo "[OK] Git found. Pulling latest updates..."
+    git pull origin main
+    if [ $? -ne 0 ]; then
+        echo "[!] Git pull failed or not a git repository. Continuing with local version."
+    else
+        echo "[OK] Code updated."
+    fi
+else
+    echo "[!] Git not found. Skipping update."
+fi
+echo ""
+
 # 1. Check for Python 3
 echo "[*] Checking for Python 3..."
 if ! command -v python3 &> /dev/null; then

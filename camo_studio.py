@@ -70,7 +70,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v21 - Smart Selection & Grouping")
+        self.root.title("Camo Studio v22 - Orphaned Blobs")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -79,7 +79,8 @@ class CamoStudioApp:
             "denoise_strength": tk.IntVar(value=DEFAULT_DENOISE),
             "min_blob_size": tk.IntVar(value=DEFAULT_MIN_BLOB),
             "filename_template": tk.StringVar(value=DEFAULT_TEMPLATE),
-            "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING) 
+            "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING),
+            "orphaned_blobs": tk.BooleanVar(value=False) # New Config
         }
         
         # 3D Export Vars
@@ -206,7 +207,7 @@ class CamoStudioApp:
     def open_config_window(self, event=None):
         top = tk.Toplevel(self.root)
         top.title("Properties")
-        top.geometry("600x550")
+        top.geometry("600x600")
         form = tk.Frame(top, padx=20, pady=20)
         form.pack(fill="both", expand=True)
         form.columnconfigure(1, weight=1)
@@ -221,6 +222,12 @@ class CamoStudioApp:
         tk.Label(form, text="Lower = More Detail. Higher = Smoother.", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
         tk.Label(form, text="Min Blob Size (px):").grid(row=row, column=0, sticky="w")
         tk.Entry(form, textvariable=self.config["min_blob_size"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        
+        # New Orphaned Blobs Feature
+        tk.Label(form, text="Orphaned Blobs:").grid(row=row, column=0, sticky="w")
+        tk.Checkbutton(form, text="Detect & Assign Random Color", variable=self.config["orphaned_blobs"]).grid(row=row, column=1, sticky="w", pady=5); row+=1
+        tk.Label(form, text="(Captures white space/background as a new layer)", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
+
         tk.Label(form, text="Max Width (px):").grid(row=row, column=0, sticky="w")
         tk.Entry(form, textvariable=self.config["max_width"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Filename Template:").grid(row=row, column=0, sticky="w")
@@ -614,6 +621,43 @@ class CamoStudioApp:
                     else:
                         final_masks.append(mask)
                 final_centers = raw_centers
+
+            # --- ORPHANED BLOBS FEATURE ---
+            if self.config["orphaned_blobs"].get():
+                # 1. Calculate total coverage
+                full_mask = np.zeros((h, w), dtype=np.uint8)
+                for m in final_masks:
+                    full_mask = cv2.bitwise_or(full_mask, m)
+                
+                # 2. Find empty space (where full_mask is 0)
+                orphans = cv2.bitwise_not(full_mask)
+                
+                # 3. Filter orphans
+                if kernel is not None:
+                    orphans = cv2.morphologyEx(orphans, cv2.MORPH_OPEN, kernel)
+                    orphans = cv2.morphologyEx(orphans, cv2.MORPH_CLOSE, kernel)
+
+                if min_blob > 0:
+                    contours, _ = cv2.findContours(orphans, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    filtered_orphans = np.zeros_like(orphans)
+                    valid = [c for c in contours if cv2.contourArea(c) >= min_blob]
+                    if valid:
+                        cv2.drawContours(filtered_orphans, valid, -1, 255, -1)
+                    orphans_final = filtered_orphans
+                else:
+                    orphans_final = orphans
+
+                # 4. Add if significant content exists
+                if cv2.countNonZero(orphans_final) > 0:
+                    while True:
+                        rand_c = np.random.randint(0, 256, 3).astype(np.uint8)
+                        dists = [np.sum((c - rand_c)**2) for c in final_centers]
+                        if not dists or min(dists) > 2000: # Ensure reasonable contrast
+                            break
+                    
+                    final_masks.append(orphans_final)
+                    final_centers.append(rand_c)
+                    print("Added Orphaned Blobs layer.")
 
             self.processed_data = {
                 "centers": final_centers,

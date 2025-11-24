@@ -7,6 +7,22 @@ ECHO      CAMO STUDIO - ENVIRONMENT SETUP WIZARD
 ECHO ========================================================
 ECHO.
 
+:: 0. CHECK FOR UPDATES (GIT)
+ECHO [*] Checking for Git installation...
+git --version >nul 2>&1
+IF %ERRORLEVEL% EQU 0 (
+    ECHO [OK] Git found. Attempting to pull latest updates...
+    git pull origin main
+    IF %ERRORLEVEL% NEQ 0 (
+        ECHO [!] Git pull failed or not a git repository. Continuing with local version.
+    ) ELSE (
+        ECHO [OK] Successfully updated to latest version.
+    )
+) ELSE (
+    ECHO [!] Git not found. Skipping auto-update.
+)
+ECHO.
+
 :: 1. CHECK FOR PYTHON
 ECHO [*] Checking for Python installation...
 python --version >nul 2>&1
@@ -51,7 +67,15 @@ ECHO     (opencv-python, numpy, svgwrite, Pillow, trimesh, shapely, scipy, mapbo
 ECHO.
 
 :: Install directly to ensure all specific libs are present even if requirements.txt is missing
-pip install opencv-python numpy svgwrite Pillow trimesh shapely scipy mapbox_earcut
+:: Using ^ to split the command across multiple lines for readability
+pip install opencv-python ^
+numpy ^
+svgwrite ^
+Pillow ^
+trimesh ^
+shapely ^
+scipy ^
+mapbox_earcut
 
 IF %ERRORLEVEL% NEQ 0 (
     ECHO.
