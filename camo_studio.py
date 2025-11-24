@@ -15,7 +15,7 @@ from shapely.ops import unary_union
 # --- DEFAULTS ---
 DEFAULT_MAX_COLORS = 4
 DEFAULT_MAX_WIDTH = 1000
-DEFAULT_SMOOTHING = 0.0005 # Reduced from 0.002 for better curves
+DEFAULT_SMOOTHING = 0.0005 
 DEFAULT_DENOISE = 5
 DEFAULT_MIN_BLOB = 50
 DEFAULT_TEMPLATE = "%INPUTFILENAME%-%COLOR%-%INDEX%"
@@ -70,7 +70,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v20 - High Detail Curves")
+        self.root.title("Camo Studio v21 - Smart Selection & Grouping")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -79,7 +79,7 @@ class CamoStudioApp:
             "denoise_strength": tk.IntVar(value=DEFAULT_DENOISE),
             "min_blob_size": tk.IntVar(value=DEFAULT_MIN_BLOB),
             "filename_template": tk.StringVar(value=DEFAULT_TEMPLATE),
-            "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING) # Now a DoubleVar
+            "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING) 
         }
         
         # 3D Export Vars
@@ -96,8 +96,11 @@ class CamoStudioApp:
         # State
         self.picked_colors = [] 
         self.layer_vars = []
-        self.select_vars = [] # Checkboxes
+        self.select_vars = [] 
         self.bulk_target_layer = tk.IntVar(value=1)
+        
+        # Selection state for Shift+Click
+        self.last_select_index = -1 
         
         self.processed_data = None 
         self.preview_images = {}
@@ -106,12 +109,11 @@ class CamoStudioApp:
         self._bind_shortcuts()
 
     def _bind_shortcuts(self):
-        """Register keyboard shortcuts"""
         self.root.bind("<Control-o>", self.load_image)
         self.root.bind("<Control-p>", self.trigger_process)
         self.root.bind("<Control-y>", self.yolo_scan)
         self.root.bind("<Control-e>", self.export_bundle_2d)
-        self.root.bind("<Control-E>", self.open_3d_export_window) # Shift+E
+        self.root.bind("<Control-E>", self.open_3d_export_window) 
         self.root.bind("<Control-r>", self.reset_picks)
         self.root.bind("<Control-s>", lambda e: [self.reorder_palette_by_similarity(), self.update_pick_ui()])
         self.root.bind("<Control-comma>", self.open_config_window)
@@ -131,14 +133,12 @@ class CamoStudioApp:
         menubar.add_cascade(label="Properties", menu=prop_menu)
         self.root.config(menu=menubar)
 
-        # Toolbar
         self.toolbar = tk.Frame(self.root, padx=10, pady=10, bg="#ddd")
         self.toolbar.pack(side=tk.TOP, fill=tk.X)
         tk.Label(self.toolbar, text="Pick Colors -> Assign Layers -> Process -> Export", bg="#ddd", fg="#555").pack(side=tk.LEFT)
         self.btn_process = tk.Button(self.toolbar, text="PROCESS IMAGE", command=self.trigger_process, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"))
         self.btn_process.pack(side=tk.RIGHT, padx=10)
 
-        # Main Area
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(expand=True, fill="both", padx=10, pady=5)
         
@@ -148,22 +148,18 @@ class CamoStudioApp:
         self.input_container = tk.Frame(self.tab_main)
         self.input_container.pack(fill="both", expand=True)
 
-        # Sidebar (Wider for controls)
         self.swatch_sidebar = tk.Frame(self.input_container, width=280, bg="#f0f0f0", padx=5, pady=5)
         self.swatch_sidebar.pack(side=tk.LEFT, fill="y")
         self.swatch_sidebar.pack_propagate(False) 
         
-        # Sidebar Tools (YOLO) - TOP
         self.sidebar_tools = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
         self.sidebar_tools.pack(side=tk.TOP, fill="x", pady=(0, 5))
         tk.Button(self.sidebar_tools, text="YOLO Scan (Auto-Detect)", command=self.yolo_scan, 
                   bg="#FF9800", fg="white", font=("Arial", 9, "bold")).pack(fill="x", padx=5)
 
-        # Bulk Action Area (Bottom of sidebar) - Pack BEFORE list to ensure it sticks to bottom
         self.bulk_frame = tk.Frame(self.swatch_sidebar, bg="#e0e0e0", padx=5, pady=5)
         self.bulk_frame.pack(side=tk.BOTTOM, fill="x")
         
-        # Bulk Header with Clear Button
         bf_header = tk.Frame(self.bulk_frame, bg="#e0e0e0")
         bf_header.pack(fill="x", pady=(0,2))
         tk.Label(bf_header, text="Bulk Assign:", bg="#e0e0e0", font=("Arial", 8, "bold")).pack(side=tk.LEFT)
@@ -172,12 +168,9 @@ class CamoStudioApp:
         bf_inner = tk.Frame(self.bulk_frame, bg="#e0e0e0")
         bf_inner.pack(fill="x", pady=2)
         tk.Label(bf_inner, text="Sel. to Layer:", bg="#e0e0e0", font=("Arial", 8)).pack(side=tk.LEFT)
-        
-        # Updated Limit to 999
         tk.Spinbox(bf_inner, from_=1, to=999, width=4, textvariable=self.bulk_target_layer).pack(side=tk.LEFT, padx=5)
         tk.Button(bf_inner, text="Apply", command=self.apply_bulk_layer, bg="#ccc", font=("Arial", 8)).pack(side=tk.LEFT)
 
-        # Swatch List (Scrollable) - MIDDLE (Expands)
         self.swatch_container = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
         self.swatch_container.pack(side=tk.LEFT, fill="both", expand=True)
         
@@ -185,25 +178,16 @@ class CamoStudioApp:
         self.swatch_scrollbar = ttk.Scrollbar(self.swatch_container, orient="vertical", command=self.swatch_canvas.yview)
         
         self.swatch_list_frame = tk.Frame(self.swatch_canvas, bg="#f0f0f0")
-        
-        # Bind configuration to update scroll region
         self.swatch_list_frame.bind("<Configure>", lambda e: self.swatch_canvas.configure(scrollregion=self.swatch_canvas.bbox("all")))
-        
         self.swatch_window = self.swatch_canvas.create_window((0, 0), window=self.swatch_list_frame, anchor="nw")
-        
-        # Configure canvas width to match frame width on resize
         self.swatch_canvas.bind("<Configure>", lambda e: self.swatch_canvas.itemconfig(self.swatch_window, width=e.width))
-        
         self.swatch_canvas.configure(yscrollcommand=self.swatch_scrollbar.set)
         
         self.swatch_scrollbar.pack(side=tk.RIGHT, fill="y")
         self.swatch_canvas.pack(side=tk.LEFT, fill="both", expand=True)
         
-        # Mousewheel scrolling
         def _on_mousewheel(event):
             self.swatch_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        
-        # Bind mousewheel to canvas and children
         self.swatch_canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         self.canvas_frame = tk.Frame(self.input_container, bg="#333")
@@ -232,13 +216,9 @@ class CamoStudioApp:
         tk.Entry(form, textvariable=self.config["max_colors"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Denoise Strength:").grid(row=row, column=0, sticky="w")
         tk.Scale(form, from_=0, to=20, orient=tk.HORIZONTAL, variable=self.config["denoise_strength"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
-        
-        # NEW SMOOTHING CONTROL
-        tk.Label(form, text="Path Smoothing (Detail vs Smoothness):").grid(row=row, column=0, sticky="w")
-        # Scale from 0.0001 (Hyper detail) to 0.005 (Very smooth/jagged)
+        tk.Label(form, text="Path Smoothing:").grid(row=row, column=0, sticky="w")
         tk.Scale(form, from_=0.0001, to=0.005, resolution=0.0001, orient=tk.HORIZONTAL, variable=self.config["smoothing"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
-        tk.Label(form, text="Lower = More Detail/Curves. Higher = Simpler/Smoother.", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
-
+        tk.Label(form, text="Lower = More Detail. Higher = Smoother.", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
         tk.Label(form, text="Min Blob Size (px):").grid(row=row, column=0, sticky="w")
         tk.Entry(form, textvariable=self.config["min_blob_size"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Max Width (px):").grid(row=row, column=0, sticky="w")
@@ -247,40 +227,31 @@ class CamoStudioApp:
         tk.Entry(form, textvariable=self.config["filename_template"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Button(top, text="Close", command=top.destroy).pack(pady=10)
 
-    # --- 3D CONFIG WINDOW ---
     def open_3d_export_window(self, event=None):
         if not self.processed_data:
             messagebox.showwarning("No Data", "Process an image first.")
             return
-
         win = tk.Toplevel(self.root)
         win.title("Export 3D Models")
         win.geometry("450x400")
-        
         form = tk.Frame(win, padx=20, pady=20)
         form.pack(fill="both", expand=True)
-        
         tk.Label(form, text="3D Stencil Settings", font=("Arial", 10, "bold")).pack(pady=10)
         tk.Checkbutton(form, text="Invert (Stencil Mode)", variable=self.exp_invert, font=("Arial", 9, "bold")).pack(pady=5)
         tk.Label(form, text="Checked: Blobs are holes.\nUnchecked: Blobs are solid.", font=("Arial", 8), fg="gray").pack(pady=(0, 10))
-
         u_frame = tk.Frame(form); u_frame.pack(fill="x", pady=5)
         tk.Label(u_frame, text="Units:").pack(side=tk.LEFT)
         tk.Radiobutton(u_frame, text="Millimeters", variable=self.exp_units, value="mm").pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(u_frame, text="Inches", variable=self.exp_units, value="in").pack(side=tk.LEFT)
-
         w_frame = tk.Frame(form); w_frame.pack(fill="x", pady=5)
         tk.Label(w_frame, text="Total Width:").pack(side=tk.LEFT)
         tk.Entry(w_frame, textvariable=self.exp_width, width=10).pack(side=tk.RIGHT)
-        
         h_frame = tk.Frame(form); h_frame.pack(fill="x", pady=5)
         tk.Label(h_frame, text="Extrusion Height:").pack(side=tk.LEFT)
         tk.Entry(h_frame, textvariable=self.exp_height, width=10).pack(side=tk.RIGHT)
-
         b_frame = tk.Frame(form); b_frame.pack(fill="x", pady=5)
         tk.Label(b_frame, text="Solid Border Width:").pack(side=tk.LEFT)
         tk.Entry(b_frame, textvariable=self.exp_border, width=10).pack(side=tk.RIGHT)
-        
         tk.Button(form, text="Export STL Files", command=lambda: self.trigger_3d_export(win), bg="blue", fg="white").pack(pady=20, fill="x")
 
     def trigger_3d_export(self, parent_window):
@@ -299,18 +270,15 @@ class CamoStudioApp:
         self.cv_original_full = cv2.imread(path)
         rgb_img = cv2.cvtColor(self.cv_original_full, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb_img)
-        
         if self.lbl_placeholder: self.lbl_placeholder.destroy()
         if self.main_canvas: self.main_canvas.destroy()
-        
         self.main_canvas = AutoResizingCanvas(self.canvas_frame, pil_image=pil_img, bg="#333", highlightthickness=0)
         self.main_canvas.pack(fill="both", expand=True)
         self.main_canvas.bind("<Button-1>", self.on_canvas_click)
-        
         self.reset_picks()
         self.lbl_status.config(text="Image loaded.")
 
-    # --- YOLO MODE ---
+    # --- YOLO MODE (UPDATED) ---
     def yolo_scan(self, event=None):
         if self.cv_original_full is None: 
             messagebox.showinfo("Info", "Load an image first.")
@@ -336,11 +304,12 @@ class CamoStudioApp:
         unique_colors = np.unique(data.astype(np.uint8), axis=0)
         final_colors = []
         
+        # 1. Get Raw Colors
         if len(unique_colors) <= 64:
             print(f"YOLO: Found {len(unique_colors)} unique colors. Using Exact.")
             final_colors = [tuple(c) for c in unique_colors]
         else:
-            print(f"YOLO: Too many colors ({len(unique_colors)}). Quantizing to 32.")
+            print(f"YOLO: Too many colors. Quantizing to 32.")
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
             ret, label, center = cv2.kmeans(data, 32, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
             center = np.uint8(center)
@@ -348,10 +317,41 @@ class CamoStudioApp:
             
         self.picked_colors = final_colors
         
-        # Apply sorting and renumbering
+        # 2. Initial Sort & Variable Creation (Assigns 1..N layers)
         self.reorder_palette_by_similarity()
+        
+        # 3. SMART GROUPING (NEW)
+        target_layers = self.config["max_colors"].get()
+        
+        # Only apply grouping if we have more colors than target layers
+        if len(self.picked_colors) > target_layers:
+            print(f"YOLO: Grouping {len(self.picked_colors)} colors into {target_layers} layers.")
+            
+            # A. Cluster the Palette itself
+            palette_data = np.array(self.picked_colors, dtype=np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+            ret, labels, centers = cv2.kmeans(palette_data, target_layers, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+            
+            # B. Sort the Centers by Brightness (Lightest -> Darkest)
+            # This ensures Layer 1 is always the lightest group, Layer N is darkest
+            centers_info = []
+            for i, center in enumerate(centers):
+                centers_info.append( {'id': i, 'val': sum(center)} )
+            centers_info.sort(key=lambda x: x['val'], reverse=True)
+            
+            # Map: Old Cluster ID -> New Sequential Layer Number (1..N)
+            cluster_to_layer_map = {}
+            for new_layer_num, info in enumerate(centers_info):
+                cluster_to_layer_map[info['id']] = new_layer_num + 1
+            
+            # C. Assign Layers to Colors
+            # labels[i] tells us which center picked_colors[i] belongs to
+            for i, cluster_idx in enumerate(labels.flatten()):
+                new_layer_id = cluster_to_layer_map[cluster_idx]
+                self.layer_vars[i].set(new_layer_id)
+
         self.update_pick_ui()
-        self.lbl_status.config(text=f"YOLO Mode: Scanned {len(self.picked_colors)} dominant colors.")
+        self.lbl_status.config(text=f"YOLO Mode: {len(self.picked_colors)} colors grouped into {target_layers} layers.")
 
     def on_canvas_click(self, event):
         if self.cv_original_full is None: return
@@ -360,30 +360,17 @@ class CamoStudioApp:
             x, y = coords
             if y < self.cv_original_full.shape[0] and x < self.cv_original_full.shape[1]:
                 bgr_color = self.cv_original_full[y, x]
-                
                 bgr_tuple = tuple(bgr_color)
                 if bgr_tuple in self.picked_colors:
                     self.lbl_status.config(text="Color already in palette.")
                     return
-                
                 self.picked_colors.append(bgr_tuple)
-                
-                # Reorder will handle creating the layer vars and sorting
                 self.reorder_palette_by_similarity()
-                
                 self.update_pick_ui()
                 self.lbl_status.config(text=f"Color added & sorted. Total: {len(self.picked_colors)}")
 
     def reorder_palette_by_similarity(self):
-        """
-        Sorts:
-        1. Layer Groups by Brightness (Lightest -> Darkest)
-        2. Colors within groups by Brightness
-        3. Renumbers layers sequentially 1..N
-        """
         if not self.picked_colors: return
-        
-        # 1. Ensure vars exist
         while len(self.layer_vars) < len(self.picked_colors):
              existing_ids = [v.get() for v in self.layer_vars]
              next_id = max(existing_ids) + 1 if existing_ids else 1
@@ -391,48 +378,33 @@ class CamoStudioApp:
         while len(self.select_vars) < len(self.picked_colors):
              self.select_vars.append(tk.BooleanVar(value=False))
 
-        # 2. Group Data
         groups = {}
         for i, color in enumerate(self.picked_colors):
             lid = self.layer_vars[i].get()
             if lid not in groups: groups[lid] = []
-            groups[lid].append({
-                'color': color,
-                'var': self.layer_vars[i],
-                'select': self.select_vars[i]
-            })
+            groups[lid].append({'color': color, 'var': self.layer_vars[i], 'select': self.select_vars[i]})
 
-        # 3. Sort Groups (Light -> Dark)
-        # Calculate average brightness of each group
         group_metrics = []
         for lid, items in groups.items():
             avg_b = np.mean([sum(x['color']) for x in items])
             group_metrics.append({'lid': lid, 'brightness': avg_b, 'items': items})
         
-        # Sort Descending (Higher BGR sum = Lighter)
         group_metrics.sort(key=lambda x: x['brightness'], reverse=True)
 
-        # 4. Flatten and Renumber
         new_colors = []
         new_layer_vars = []
         new_select_vars = []
-        
         current_layer_num = 1
         
         for g in group_metrics:
-            # Sort items INSIDE the group by brightness (Light -> Dark)
             items = g['items']
             items.sort(key=lambda x: sum(x['color']), reverse=True)
-            
             for item in items:
                 new_colors.append(item['color'])
-                # Assign NEW sequential layer number
                 new_layer_vars.append(tk.IntVar(value=current_layer_num))
                 new_select_vars.append(item['select'])
-            
             current_layer_num += 1
 
-        # 5. Apply
         self.picked_colors = new_colors
         self.layer_vars = new_layer_vars
         self.select_vars = new_select_vars
@@ -442,10 +414,7 @@ class CamoStudioApp:
             del self.picked_colors[index]
             del self.layer_vars[index] 
             del self.select_vars[index]
-            
-            # Re-compact IDs after removal to keep numbers clean
             self.compact_layer_ids()
-            
             self.update_pick_ui()
             self.lbl_status.config(text=f"Color removed. Total: {len(self.picked_colors)}")
 
@@ -453,6 +422,7 @@ class CamoStudioApp:
         self.picked_colors = []
         self.layer_vars = []
         self.select_vars = []
+        self.last_select_index = -1
         self.update_pick_ui()
         if self.cv_original_full is not None:
             for tab in self.notebook.tabs():
@@ -476,12 +446,25 @@ class CamoStudioApp:
             messagebox.showinfo("Info", "No colors selected.")
 
     def compact_layer_ids(self):
-        """Renumber layers to be continuous 1..N"""
         current_ids = sorted(list(set(v.get() for v in self.layer_vars)))
         id_map = {old: new+1 for new, old in enumerate(current_ids)}
-        
         for var in self.layer_vars:
             var.set(id_map[var.get()])
+
+    # --- SELECTION LOGIC ---
+    def handle_click_selection(self, index, event):
+        """Handles click and Shift+Click logic for the checkbox range"""
+        if event and (event.state & 0x0001): # Shift Key Held
+            if self.last_select_index != -1:
+                start = min(self.last_select_index, index)
+                end = max(self.last_select_index, index)
+                # Set range to True
+                for i in range(start, end + 1):
+                    self.select_vars[i].set(True)
+        else:
+            # Normal click logic is handled by Checkbutton naturally toggling.
+            # We just need to track this as the anchor for the next shift click.
+            self.last_select_index = index
 
     def update_pick_ui(self):
         for widget in self.swatch_list_frame.winfo_children():
@@ -511,6 +494,10 @@ class CamoStudioApp:
             
             chk = tk.Checkbutton(f, variable=sel_var, bg=hex_c, activebackground=hex_c)
             chk.pack(side=tk.LEFT, padx=2)
+            # Bind Shift+Click to the Checkbutton
+            chk.bind("<Shift-Button-1>", lambda e, idx=i: self.handle_click_selection(idx, e))
+            # Also bind normal click to update anchor
+            chk.bind("<Button-1>", lambda e, idx=i: self.handle_click_selection(idx, None))
 
             btn_del = tk.Label(f, text="X", bg="red", fg="white", font=("Arial", 8, "bold"), width=3)
             btn_del.pack(side=tk.LEFT, fill="y")
@@ -519,7 +506,6 @@ class CamoStudioApp:
             lbl = tk.Label(f, text=hex_c, bg=hex_c, fg=fg, font=("Consolas", 9, "bold"))
             lbl.pack(side=tk.LEFT, expand=True)
             
-            # Updated Limit to 999
             spin = tk.Spinbox(f, from_=1, to=999, width=4, textvariable=var, font=("Arial", 10))
             spin.pack(side=tk.RIGHT, padx=5)
 
@@ -687,7 +673,7 @@ class CamoStudioApp:
             width = self.processed_data["width"]
             height = self.processed_data["height"]
             tmpl = self.config["filename_template"].get()
-            smooth = self.config["smoothing"].get() # Use .get() for DoubleVar
+            smooth = self.config["smoothing"].get() 
             
             for i in range(len(centers)):
                 self.progress_var.set(((i+1)/len(centers))*100)
@@ -724,7 +710,7 @@ class CamoStudioApp:
             orig_w = self.processed_data["width"]
             orig_h = self.processed_data["height"]
             tmpl = self.config["filename_template"].get()
-            smooth = self.config["smoothing"].get() # Use .get() for DoubleVar
+            smooth = self.config["smoothing"].get() 
 
             target_w = self.exp_width.get()
             extrusion = self.exp_height.get()
@@ -750,7 +736,7 @@ class CamoStudioApp:
                 if hierarchy is not None:
                     hierarchy = hierarchy[0]
                     for j, c in enumerate(contours):
-                        if hierarchy[j][3] == -1: # Outer
+                        if hierarchy[j][3] == -1: 
                             epsilon = smooth * cv2.arcLength(c, True)
                             approx = cv2.approxPolyDP(c, epsilon, True)
                             if len(approx) < 3: continue
