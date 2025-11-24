@@ -15,13 +15,13 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 - **Hybrid Color Detection:** Use automatic K-Means quantization to find dominant colors, or manually click the canvas to pick specific target colors.
 
 
-- **Smart Palette Sorting:** Colors are automatically sorted by visual similarity (Nearest Neighbor algorithm), creating smooth gradients in your list to make layer organization easier.
+- **Smart Palette Sorting:** Colors are automatically sorted by brightness (Lightest to Darkest) and visual similarity, creating smooth gradients in your list to make layer organization easier.
 
 
 - **Bulk Layer Management:** Use checkboxes to select multiple colors and assign them to a single layer instantly.
 
 
-- **Auto-Renumbering:** The app automatically compacts layer numbers (e.g., 1, 3, 5 → 1, 2, 3) to ensure a clean, sequential output without gaps.
+- **Auto-Renumbering:** The app automatically compacts layer numbers (e.g., 1, 3, 5  1, 2, 3) to ensure a clean, sequential output without gaps. Supports up to 999 layers.
 
 
 - **Duplicate Prevention:** Automatically detects and prevents adding the same color twice.
@@ -47,7 +47,7 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 - **SVG Bundles:** Exports each color layer as a separate, clean SVG file.
 
 
-- **Optimized Paths:** Uses polygon simplification (Ramer-Douglas-Peucker algorithm) to create smooth vector curves suitable for vinyl cutters (Cricut/Silhouette) and laser cutters.
+- **Optimized Paths:** Uses polygon simplification (Ramer-Douglas-Peucker algorithm) to create smooth vector curves suitable for vinyl cutters (Cricut/Silhouette) and laser cutters. Adjustable smoothing factor allows for high-detail organic curves or low-poly angular styles.
 
 
 
@@ -201,35 +201,35 @@ Shortcut
 
 Load Image
 
-Ctrl + O
+`Ctrl + O`
 
 Process Image
 
-Ctrl + P
+`Ctrl + P`
 
 YOLO Scan
 
-Ctrl + Y
+`Ctrl + Y`
 
 Export SVG (2D)
 
-Ctrl + E
+`Ctrl + E`
 
 Export STL (3D)
 
-Ctrl + Shift + E
+`Ctrl + Shift + E`
 
 Clear Palette
 
-Ctrl + R
+`Ctrl + R`
 
 Resort Palette
 
-Ctrl + S
+`Ctrl + S`
 
 Configuration
 
-Ctrl + ,
+`Ctrl + ,`
 
 ## Configuration Settings
 
@@ -246,6 +246,10 @@ Used only in Auto-Mode. How many dominant colors to find.
 **Denoise Strength**
 
 (1-20) Higher values blur the image more before processing, resulting in rounder, smoother blobs. Lower values keep sharp details.
+
+**Path Smoothing**
+
+Controls vector detail. Lower values (left) create complex, organic curves. Higher values (right) create simpler, smoother, or more angular shapes.
 
 **Min Blob Size**
 

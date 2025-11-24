@@ -15,7 +15,7 @@ from shapely.ops import unary_union
 # --- DEFAULTS ---
 DEFAULT_MAX_COLORS = 4
 DEFAULT_MAX_WIDTH = 1000
-DEFAULT_SMOOTHING = 0.002
+DEFAULT_SMOOTHING = 0.0005 # Reduced from 0.002 for better curves
 DEFAULT_DENOISE = 5
 DEFAULT_MIN_BLOB = 50
 DEFAULT_TEMPLATE = "%INPUTFILENAME%-%COLOR%-%INDEX%"
@@ -70,16 +70,16 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v19 - Shortcuts")
+        self.root.title("Camo Studio v20 - High Detail Curves")
         self.root.geometry("1200x850")
 
         self.config = {
-            "max_colors": tk.IntVar(value=DEFAULT_MAX_COLORS),
+                "max_colors": tk.IntVar(value=DEFAULT_MAX_COLORS),
             "max_width": tk.IntVar(value=DEFAULT_MAX_WIDTH),
             "denoise_strength": tk.IntVar(value=DEFAULT_DENOISE),
             "min_blob_size": tk.IntVar(value=DEFAULT_MIN_BLOB),
             "filename_template": tk.StringVar(value=DEFAULT_TEMPLATE),
-            "smoothing": DEFAULT_SMOOTHING
+            "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING) # Now a DoubleVar
         }
         
         # 3D Export Vars
@@ -222,7 +222,7 @@ class CamoStudioApp:
     def open_config_window(self, event=None):
         top = tk.Toplevel(self.root)
         top.title("Properties")
-        top.geometry("600x500")
+        top.geometry("600x550")
         form = tk.Frame(top, padx=20, pady=20)
         form.pack(fill="both", expand=True)
         form.columnconfigure(1, weight=1)
@@ -232,6 +232,13 @@ class CamoStudioApp:
         tk.Entry(form, textvariable=self.config["max_colors"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Denoise Strength:").grid(row=row, column=0, sticky="w")
         tk.Scale(form, from_=0, to=20, orient=tk.HORIZONTAL, variable=self.config["denoise_strength"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        
+        # NEW SMOOTHING CONTROL
+        tk.Label(form, text="Path Smoothing (Detail vs Smoothness):").grid(row=row, column=0, sticky="w")
+        # Scale from 0.0001 (Hyper detail) to 0.005 (Very smooth/jagged)
+        tk.Scale(form, from_=0.0001, to=0.005, resolution=0.0001, orient=tk.HORIZONTAL, variable=self.config["smoothing"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        tk.Label(form, text="Lower = More Detail/Curves. Higher = Simpler/Smoother.", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
+
         tk.Label(form, text="Min Blob Size (px):").grid(row=row, column=0, sticky="w")
         tk.Entry(form, textvariable=self.config["min_blob_size"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Max Width (px):").grid(row=row, column=0, sticky="w")
@@ -390,7 +397,7 @@ class CamoStudioApp:
             lid = self.layer_vars[i].get()
             if lid not in groups: groups[lid] = []
             groups[lid].append({
-                'color': color,
+                    'color': color,
                 'var': self.layer_vars[i],
                 'select': self.select_vars[i]
             })
@@ -623,7 +630,7 @@ class CamoStudioApp:
                 final_centers = raw_centers
 
             self.processed_data = {
-                "centers": final_centers,
+                    "centers": final_centers,
                 "masks": final_masks,
                 "width": w,
                 "height": h
@@ -680,7 +687,7 @@ class CamoStudioApp:
             width = self.processed_data["width"]
             height = self.processed_data["height"]
             tmpl = self.config["filename_template"].get()
-            smooth = self.config["smoothing"]
+            smooth = self.config["smoothing"].get() # Use .get() for DoubleVar
             
             for i in range(len(centers)):
                 self.progress_var.set(((i+1)/len(centers))*100)
@@ -717,7 +724,7 @@ class CamoStudioApp:
             orig_w = self.processed_data["width"]
             orig_h = self.processed_data["height"]
             tmpl = self.config["filename_template"].get()
-            smooth = self.config["smoothing"]
+            smooth = self.config["smoothing"].get() # Use .get() for DoubleVar
 
             target_w = self.exp_width.get()
             extrusion = self.exp_height.get()
@@ -827,4 +834,7 @@ class CamoStudioApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = CamoStudioApp(root)
-    root.mainloop()
+    root.mainloop())))
+            })
+            }))")")")
+        }
