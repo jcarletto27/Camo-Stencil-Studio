@@ -81,9 +81,14 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v28 - JSON Serialization Fix")
+        self.root.title("Camo Studio v29 - Persistent Config")
         self.root.geometry("1200x850")
+        
+        # --- 1. Define Settings File & Directory Memory ---
+        self.settings_file = "user_settings.json"
+        self.last_opened_dir = os.getcwd()
 
+        # --- 2. Initialize Variables with Defaults ---
         self.config = {
             "max_colors": tk.IntVar(value=DEFAULT_MAX_COLORS),
             "max_width": tk.IntVar(value=DEFAULT_MAX_WIDTH),
@@ -102,6 +107,9 @@ class CamoStudioApp:
         self.exp_bridge = tk.DoubleVar(value=2.0)
         self.exp_invert = tk.BooleanVar(value=True)
         
+        # --- 3. Load Persistent Settings ---
+        self.load_app_settings()
+        
         self.original_image_path = None
         self.cv_original_full = None 
         self.current_base_name = "camo"
@@ -111,14 +119,75 @@ class CamoStudioApp:
         self.layer_vars = []
         self.select_vars = [] 
         self.bulk_target_layer = tk.IntVar(value=1)
-        
         self.last_select_index = -1 
-        
         self.processed_data = None 
         self.preview_images = {}
 
         self._create_ui()
         self._bind_shortcuts()
+        
+        # --- 4. Bind Close Event to Save ---
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def load_app_settings(self):
+        """Loads configuration and last directory from JSON on startup."""
+        if not os.path.exists(self.settings_file): return
+        try:
+            with open(self.settings_file, 'r') as f:
+                data = json.load(f)
+            
+            # Load Config Dict
+            cfg = data.get("config", {})
+            for k, v in cfg.items():
+                if k in self.config:
+                    try:
+                        self.config[k].set(v)
+                    except: pass
+            
+            # Load Export Settings
+            exp = data.get("export", {})
+            self.exp_units.set(exp.get("units", "mm"))
+            self.exp_width.set(exp.get("width", 100.0))
+            self.exp_height.set(exp.get("height", 2.0))
+            self.exp_border.set(exp.get("border", 5.0))
+            self.exp_bridge.set(exp.get("bridge", 2.0))
+            self.exp_invert.set(exp.get("invert", True))
+            
+            # Load Last Directory
+            last_dir = data.get("last_directory", "")
+            if last_dir and os.path.exists(last_dir):
+                self.last_opened_dir = last_dir
+                
+            print("Settings loaded successfully.")
+                
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+
+    def save_app_settings(self):
+        """Saves current configuration and directory to JSON."""
+        data = {
+            "config": {k: v.get() for k, v in self.config.items()},
+            "export": {
+                "units": self.exp_units.get(),
+                "width": self.exp_width.get(),
+                "height": self.exp_height.get(),
+                "border": self.exp_border.get(),
+                "bridge": self.exp_bridge.get(),
+                "invert": self.exp_invert.get()
+            },
+            "last_directory": self.last_opened_dir
+        }
+        try:
+            with open(self.settings_file, 'w') as f:
+                json.dump(data, f, indent=4)
+            print("Settings saved.")
+        except Exception as e:
+            print(f"Failed to save settings: {e}")
+
+    def on_close(self):
+        """Handler for window close event."""
+        self.save_app_settings()
+        self.root.destroy()
 
     def _bind_shortcuts(self):
         self.root.bind("<Control-n>", lambda e: self.reset_project())
@@ -142,7 +211,7 @@ class CamoStudioApp:
         file_menu.add_command(label="Export SVG Bundle (Ctrl+E)", command=self.export_bundle_2d)
         file_menu.add_command(label="Export STL Models (Ctrl+Shift+E)", command=self.open_3d_export_window)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.root.quit)
+        file_menu.add_command(label="Exit", command=self.on_close) # Use on_close here too
         menubar.add_cascade(label="File", menu=file_menu)
         
         prop_menu = tk.Menu(menubar, tearoff=0)
@@ -285,8 +354,11 @@ class CamoStudioApp:
         tk.Button(form, text="Export STL Files", command=lambda: self.trigger_3d_export(win), bg="blue", fg="white").pack(pady=20, fill="x")
 
     def trigger_3d_export(self, parent_window):
-        target_dir = filedialog.askdirectory()
+        # Update directory from dialog
+        target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
         if not target_dir: return
+        self.last_opened_dir = target_dir # Remember this dir
+        
         parent_window.destroy()
         self.progress['mode'] = 'determinate'
         self.progress_var.set(0)
@@ -326,15 +398,17 @@ class CamoStudioApp:
     def load_image(self, from_path=None):
         path = from_path
         if not path:
-            path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
+            path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
         
         if not path: return
+        self.last_opened_dir = os.path.dirname(path) # Remember this dir
         
         # If file not found (e.g. moved project file)
         if not os.path.exists(path):
             messagebox.showerror("Error", f"Image file not found:\n{path}\nPlease locate it manually.")
-            path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
+            path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
             if not path: return
+            self.last_opened_dir = os.path.dirname(path)
 
         self.original_image_path = path
         self.current_base_name = os.path.splitext(os.path.basename(path))[0]
@@ -380,8 +454,9 @@ class CamoStudioApp:
             }
         }
         
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Camo Project", "*.json")])
+        path = filedialog.asksaveasfilename(initialdir=self.last_opened_dir, defaultextension=".json", filetypes=[("Camo Project", "*.json")])
         if path:
+            self.last_opened_dir = os.path.dirname(path) # Remember this dir
             try:
                 with open(path, 'w') as f:
                     json.dump(data, f, indent=4)
@@ -393,8 +468,9 @@ class CamoStudioApp:
         if self.picked_colors and not messagebox.askyesno("Open Project", "Discard current changes?"):
             return
 
-        path = filedialog.askopenfilename(filetypes=[("Camo Project", "*.json")])
+        path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Camo Project", "*.json")])
         if not path: return
+        self.last_opened_dir = os.path.dirname(path) # Remember this dir
         
         try:
             with open(path, 'r') as f:
@@ -407,7 +483,9 @@ class CamoStudioApp:
             if "config" in data:
                 for k, v in data["config"].items():
                     if k in self.config:
-                        self.config[k].set(v)
+                        try:
+                            self.config[k].set(v)
+                        except: pass
             
             # 3. Restore 3D Settings
             if "3d_export" in data:
@@ -829,8 +907,11 @@ class CamoStudioApp:
 
     def export_bundle_2d(self, event=None):
         if not self.processed_data: return
-        target_dir = filedialog.askdirectory()
+        # Update directory from dialog
+        target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
         if not target_dir: return
+        self.last_opened_dir = target_dir # Remember this dir
+        
         self.progress['mode'] = 'determinate'
         self.progress_var.set(0)
         threading.Thread(target=self.export_2d_thread, args=(target_dir,)).start()
