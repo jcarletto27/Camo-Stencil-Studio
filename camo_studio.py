@@ -81,7 +81,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v27 - Project Manager")
+        self.root.title("Camo Studio v28 - JSON Serialization Fix")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -292,7 +292,6 @@ class CamoStudioApp:
         self.progress_var.set(0)
         threading.Thread(target=self.export_3d_thread, args=(target_dir,)).start()
 
-    # --- NEW: RESET / NEW PROJECT ---
     def reset_project(self):
         """Clears all data and UI to start fresh."""
         if self.picked_colors and not messagebox.askyesno("New Project", "Discard current changes?"):
@@ -324,7 +323,6 @@ class CamoStudioApp:
         self.btn_main_load.place(relx=0.5, rely=0.5, anchor="center")
         self.lbl_status.config(text="Project cleared.")
 
-    # --- MODIFIED: LOAD IMAGE (Supports Path) ---
     def load_image(self, from_path=None):
         path = from_path
         if not path:
@@ -358,18 +356,20 @@ class CamoStudioApp:
             
         self.lbl_status.config(text=f"Loaded: {os.path.basename(path)}")
 
-    # --- NEW: SAVE PROJECT ---
     def save_project_json(self):
         if not self.original_image_path:
             messagebox.showwarning("Warning", "No image loaded to save.")
             return
 
+        # Sanitize colors: Convert numpy.uint8 to standard python int
+        sanitized_colors = [tuple(int(x) for x in c) for c in self.picked_colors]
+
         data = {
             "version": "1.0",
             "image_path": self.original_image_path,
             "config": {k: v.get() for k, v in self.config.items()},
-            "colors": self.picked_colors, # List of tuples [(b,g,r), ...]
-            "layers": [v.get() for v in self.layer_vars], # List of ints
+            "colors": sanitized_colors, 
+            "layers": [v.get() for v in self.layer_vars],
             "3d_export": {
                 "units": self.exp_units.get(),
                 "width": self.exp_width.get(),
@@ -389,7 +389,6 @@ class CamoStudioApp:
             except Exception as e:
                 messagebox.showerror("Save Error", str(e))
 
-    # --- NEW: OPEN PROJECT ---
     def load_project_json(self):
         if self.picked_colors and not messagebox.askyesno("Open Project", "Discard current changes?"):
             return
@@ -465,13 +464,13 @@ class CamoStudioApp:
         
         if len(unique_colors) <= 64:
             print(f"YOLO: Found {len(unique_colors)} unique colors. Using Exact.")
-            final_colors = [tuple(c) for c in unique_colors]
+            final_colors = [tuple(int(x) for x in c) for c in unique_colors]
         else:
             print(f"YOLO: Too many colors. Quantizing to 32.")
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
             ret, label, center = cv2.kmeans(data, 32, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
             center = np.uint8(center)
-            final_colors = [tuple(c) for c in center]
+            final_colors = [tuple(int(x) for x in c) for c in center]
             
         self.picked_colors = final_colors
         self.reorder_palette_by_similarity()
@@ -503,7 +502,7 @@ class CamoStudioApp:
             x, y = coords
             if y < self.cv_original_full.shape[0] and x < self.cv_original_full.shape[1]:
                 bgr_color = self.cv_original_full[y, x]
-                bgr_tuple = tuple(bgr_color)
+                bgr_tuple = tuple(int(x) for x in bgr_color)
                 if bgr_tuple in self.picked_colors:
                     self.lbl_status.config(text="Color already in palette.")
                     return
