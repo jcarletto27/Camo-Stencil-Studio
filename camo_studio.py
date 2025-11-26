@@ -5,12 +5,13 @@ import numpy as np
 import svgwrite
 import os
 import threading
+import json
 from PIL import Image, ImageTk
 
 # --- 3D IMPORTS ---
 import trimesh
-from shapely.geometry import Polygon, MultiPolygon
-from shapely.ops import unary_union
+from shapely.geometry import Polygon, MultiPolygon, LineString
+from shapely.ops import unary_union, nearest_points
 
 # --- DEFAULTS ---
 DEFAULT_MAX_COLORS = 4
@@ -27,19 +28,13 @@ def is_bright(bgr):
     return (bgr[2] * 0.299 + bgr[1] * 0.587 + bgr[0] * 0.114) > 186
 
 def filter_small_blobs(mask, min_size):
-    """
-    Optimized area filtering using Connected Components (Raster).
-    """
+    """ Optimized area filtering using Connected Components (Raster). """
     if min_size <= 0: return mask
-    
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-    
     valid_labels = (stats[:, cv2.CC_STAT_AREA] >= min_size)
     valid_labels[0] = False 
-    
     lut = np.zeros(n, dtype=np.uint8)
     lut[valid_labels] = 255
-    
     return lut[labels]
 
 class AutoResizingCanvas(tk.Canvas):
@@ -86,7 +81,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v25 - Fixed Orphan Freeze")
+        self.root.title("Camo Studio v27 - Project Manager")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -104,6 +99,7 @@ class CamoStudioApp:
         self.exp_width = tk.DoubleVar(value=100.0)
         self.exp_height = tk.DoubleVar(value=2.0) 
         self.exp_border = tk.DoubleVar(value=5.0)
+        self.exp_bridge = tk.DoubleVar(value=2.0)
         self.exp_invert = tk.BooleanVar(value=True)
         
         self.original_image_path = None
@@ -125,19 +121,24 @@ class CamoStudioApp:
         self._bind_shortcuts()
 
     def _bind_shortcuts(self):
-        self.root.bind("<Control-o>", self.load_image)
+        self.root.bind("<Control-n>", lambda e: self.reset_project())
+        self.root.bind("<Control-o>", lambda e: self.load_image())
+        self.root.bind("<Control-s>", lambda e: self.save_project_json())
+        self.root.bind("<Control-Shift-O>", lambda e: self.load_project_json())
         self.root.bind("<Control-p>", self.trigger_process)
         self.root.bind("<Control-y>", self.yolo_scan)
         self.root.bind("<Control-e>", self.export_bundle_2d)
-        self.root.bind("<Control-E>", self.open_3d_export_window) 
-        self.root.bind("<Control-r>", self.reset_picks)
-        self.root.bind("<Control-s>", lambda e: [self.reorder_palette_by_similarity(), self.update_pick_ui()])
         self.root.bind("<Control-comma>", self.open_config_window)
 
     def _create_ui(self):
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Load Base Image (Ctrl+O)", command=self.load_image)
+        file_menu.add_command(label="New Project (Ctrl+N)", command=self.reset_project)
+        file_menu.add_command(label="Open Image... (Ctrl+O)", command=lambda: self.load_image())
+        file_menu.add_separator()
+        file_menu.add_command(label="Open Project... (Ctrl+Shift+O)", command=self.load_project_json)
+        file_menu.add_command(label="Save Project (Ctrl+S)", command=self.save_project_json)
+        file_menu.add_separator()
         file_menu.add_command(label="Export SVG Bundle (Ctrl+E)", command=self.export_bundle_2d)
         file_menu.add_command(label="Export STL Models (Ctrl+Shift+E)", command=self.open_3d_export_window)
         file_menu.add_separator()
@@ -209,8 +210,11 @@ class CamoStudioApp:
         self.canvas_frame = tk.Frame(self.input_container, bg="#333")
         self.canvas_frame.pack(side=tk.LEFT, fill="both", expand=True)
         
-        self.lbl_placeholder = tk.Label(self.canvas_frame, text="Load an image to start.", font=("Arial", 14), fg="#555")
-        self.lbl_placeholder.pack(expand=True)
+        # --- OPEN BUTTON CENTERED ---
+        self.btn_main_load = tk.Button(self.canvas_frame, text="OPEN IMAGE", command=lambda: self.load_image(),
+                                       font=("Arial", 16, "bold"), bg="#555", fg="white", padx=20, pady=10, cursor="hand2")
+        self.btn_main_load.place(relx=0.5, rely=0.5, anchor="center")
+        
         self.main_canvas = None
 
         self.progress_var = tk.DoubleVar()
@@ -240,8 +244,7 @@ class CamoStudioApp:
         
         tk.Label(form, text="Orphaned Blobs:").grid(row=row, column=0, sticky="w")
         tk.Checkbutton(form, text="Detect & Assign Random Color", variable=self.config["orphaned_blobs"]).grid(row=row, column=1, sticky="w", pady=5); row+=1
-        tk.Label(form, text="(Captures white space/background as a new layer)", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
-
+        
         tk.Label(form, text="Max Width (px):").grid(row=row, column=0, sticky="w")
         tk.Entry(form, textvariable=self.config["max_width"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Filename Template:").grid(row=row, column=0, sticky="w")
@@ -254,7 +257,7 @@ class CamoStudioApp:
             return
         win = tk.Toplevel(self.root)
         win.title("Export 3D Models")
-        win.geometry("450x400")
+        win.geometry("450x450")
         form = tk.Frame(win, padx=20, pady=20)
         form.pack(fill="both", expand=True)
         tk.Label(form, text="3D Stencil Settings", font=("Arial", 10, "bold")).pack(pady=10)
@@ -273,6 +276,12 @@ class CamoStudioApp:
         b_frame = tk.Frame(form); b_frame.pack(fill="x", pady=5)
         tk.Label(b_frame, text="Solid Border Width:").pack(side=tk.LEFT)
         tk.Entry(b_frame, textvariable=self.exp_border, width=10).pack(side=tk.RIGHT)
+        
+        br_frame = tk.Frame(form); br_frame.pack(fill="x", pady=5)
+        tk.Label(br_frame, text="Stencil Bridge Width:").pack(side=tk.LEFT)
+        tk.Entry(br_frame, textvariable=self.exp_bridge, width=10).pack(side=tk.RIGHT)
+        tk.Label(form, text="(Automatically connects floating islands)", font=("Arial", 7), fg="gray").pack()
+
         tk.Button(form, text="Export STL Files", command=lambda: self.trigger_3d_export(win), bg="blue", fg="white").pack(pady=20, fill="x")
 
     def trigger_3d_export(self, parent_window):
@@ -283,21 +292,151 @@ class CamoStudioApp:
         self.progress_var.set(0)
         threading.Thread(target=self.export_3d_thread, args=(target_dir,)).start()
 
-    def load_image(self, event=None):
-        path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
+    # --- NEW: RESET / NEW PROJECT ---
+    def reset_project(self):
+        """Clears all data and UI to start fresh."""
+        if self.picked_colors and not messagebox.askyesno("New Project", "Discard current changes?"):
+            return
+        
+        self.original_image_path = None
+        self.cv_original_full = None
+        self.current_base_name = "camo"
+        
+        # Clear Data
+        self.picked_colors = []
+        self.layer_vars = []
+        self.select_vars = []
+        self.last_select_index = -1
+        self.processed_data = None
+        self.preview_images = {}
+        
+        # Clear UI
+        self.update_pick_ui()
+        if self.main_canvas: 
+            self.main_canvas.destroy()
+            self.main_canvas = None
+        
+        # Remove extra tabs
+        for tab in self.notebook.tabs():
+            if tab != str(self.tab_main): self.notebook.forget(tab)
+            
+        # Show Open Button
+        self.btn_main_load.place(relx=0.5, rely=0.5, anchor="center")
+        self.lbl_status.config(text="Project cleared.")
+
+    # --- MODIFIED: LOAD IMAGE (Supports Path) ---
+    def load_image(self, from_path=None):
+        path = from_path
+        if not path:
+            path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
+        
         if not path: return
+        
+        # If file not found (e.g. moved project file)
+        if not os.path.exists(path):
+            messagebox.showerror("Error", f"Image file not found:\n{path}\nPlease locate it manually.")
+            path = filedialog.askopenfilename(filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
+            if not path: return
+
         self.original_image_path = path
         self.current_base_name = os.path.splitext(os.path.basename(path))[0]
         self.cv_original_full = cv2.imread(path)
         rgb_img = cv2.cvtColor(self.cv_original_full, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb_img)
-        if self.lbl_placeholder: self.lbl_placeholder.destroy()
+        
+        # Hide the center button
+        self.btn_main_load.place_forget()
+        
         if self.main_canvas: self.main_canvas.destroy()
         self.main_canvas = AutoResizingCanvas(self.canvas_frame, pil_image=pil_img, bg="#333", highlightthickness=0)
         self.main_canvas.pack(fill="both", expand=True)
         self.main_canvas.bind("<Button-1>", self.on_canvas_click)
-        self.reset_picks()
-        self.lbl_status.config(text="Image loaded.")
+        
+        # Only reset picks if we are doing a manual load, not a project load
+        if from_path is None:
+            self.reset_picks()
+            
+        self.lbl_status.config(text=f"Loaded: {os.path.basename(path)}")
+
+    # --- NEW: SAVE PROJECT ---
+    def save_project_json(self):
+        if not self.original_image_path:
+            messagebox.showwarning("Warning", "No image loaded to save.")
+            return
+
+        data = {
+            "version": "1.0",
+            "image_path": self.original_image_path,
+            "config": {k: v.get() for k, v in self.config.items()},
+            "colors": self.picked_colors, # List of tuples [(b,g,r), ...]
+            "layers": [v.get() for v in self.layer_vars], # List of ints
+            "3d_export": {
+                "units": self.exp_units.get(),
+                "width": self.exp_width.get(),
+                "height": self.exp_height.get(),
+                "border": self.exp_border.get(),
+                "bridge": self.exp_bridge.get(),
+                "invert": self.exp_invert.get()
+            }
+        }
+        
+        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("Camo Project", "*.json")])
+        if path:
+            try:
+                with open(path, 'w') as f:
+                    json.dump(data, f, indent=4)
+                self.lbl_status.config(text=f"Project saved to {os.path.basename(path)}")
+            except Exception as e:
+                messagebox.showerror("Save Error", str(e))
+
+    # --- NEW: OPEN PROJECT ---
+    def load_project_json(self):
+        if self.picked_colors and not messagebox.askyesno("Open Project", "Discard current changes?"):
+            return
+
+        path = filedialog.askopenfilename(filetypes=[("Camo Project", "*.json")])
+        if not path: return
+        
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+            
+            # 1. Load Image
+            self.load_image(from_path=data.get("image_path"))
+            
+            # 2. Restore Config
+            if "config" in data:
+                for k, v in data["config"].items():
+                    if k in self.config:
+                        self.config[k].set(v)
+            
+            # 3. Restore 3D Settings
+            if "3d_export" in data:
+                ex = data["3d_export"]
+                self.exp_units.set(ex.get("units", "mm"))
+                self.exp_width.set(ex.get("width", 100.0))
+                self.exp_height.set(ex.get("height", 2.0))
+                self.exp_border.set(ex.get("border", 5.0))
+                self.exp_bridge.set(ex.get("bridge", 2.0))
+                self.exp_invert.set(ex.get("invert", True))
+
+            # 4. Restore Palette & Layers
+            self.picked_colors = [tuple(c) for c in data.get("colors", [])]
+            saved_layers = data.get("layers", [])
+            
+            self.layer_vars = []
+            self.select_vars = []
+            
+            for i in range(len(self.picked_colors)):
+                lid = saved_layers[i] if i < len(saved_layers) else 1
+                self.layer_vars.append(tk.IntVar(value=lid))
+                self.select_vars.append(tk.BooleanVar(value=False))
+                
+            self.update_pick_ui()
+            self.lbl_status.config(text=f"Project loaded: {os.path.basename(path)}")
+            
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load project:\n{str(e)}")
 
     def yolo_scan(self, event=None):
         if self.cv_original_full is None: 
@@ -617,14 +756,12 @@ class CamoStudioApp:
 
             # 4. Orphaned Blobs (Optimized)
             if config["orphaned_blobs"]:
-                # We already have total_coverage_mask, no need to loop final_masks again!
                 orphans = cv2.bitwise_not(total_coverage_mask)
                 
                 if kernel is not None:
                     orphans = cv2.morphologyEx(orphans, cv2.MORPH_OPEN, kernel)
                     orphans = cv2.morphologyEx(orphans, cv2.MORPH_CLOSE, kernel)
 
-                # Filter Orphans
                 orphans_final = filter_small_blobs(orphans, min_blob)
 
                 if cv2.countNonZero(orphans_final) > 0:
@@ -736,6 +873,51 @@ class CamoStudioApp:
             print(e)
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
 
+    def apply_stencil_bridges(self, polys, bridge_width):
+        """
+        Iterates through polygons. If a polygon has a hole (interior),
+        it creates a bridge (cut) connecting the interior to the exterior,
+        anchoring the island to the main frame.
+        """
+        bridged_polys = []
+        
+        for poly in polys:
+            if not poly.is_valid: poly = poly.buffer(0)
+            
+            # If the polygon has no holes, it's safe (no floating islands)
+            if len(poly.interiors) == 0:
+                bridged_polys.append(poly)
+                continue
+
+            # It has holes! We need to anchor the islands inside.
+            temp_poly = poly
+            
+            for interior in poly.interiors:
+                # 1. Find the shortest distance between the inner island and the outer frame
+                p1, p2 = nearest_points(temp_poly.exterior, interior)
+                
+                # 2. Create a line connecting them
+                bridge_line = LineString([p1, p2])
+                
+                # 3. Thicken the line into a rectangle (The Bridge)
+                bridge_shape = bridge_line.buffer(bridge_width / 2)
+                
+                # 4. Subtract the bridge from the polygon (Cutting the ring)
+                try:
+                    temp_poly = temp_poly.difference(bridge_shape)
+                    if not temp_poly.is_valid: temp_poly = temp_poly.buffer(0)
+                except Exception as e:
+                    print(f"Bridge failed on one island: {e}")
+            
+            # Handle case where difference returns a MultiPolygon (if we cut it in half)
+            if isinstance(temp_poly, MultiPolygon):
+                for geom in temp_poly.geoms:
+                    bridged_polys.append(geom)
+            else:
+                bridged_polys.append(temp_poly)
+                
+        return bridged_polys
+
     def export_3d_thread(self, target_dir):
         try:
             centers = self.processed_data["centers"]
@@ -791,9 +973,17 @@ class CamoStudioApp:
                             
                             try:
                                 poly = Polygon(shell=outer_pts, holes=holes)
-                                if not poly.is_valid: poly = poly.buffer(0)
-                                shapely_polys.append(poly)
+                                clean_poly = poly.buffer(0)
+                                if clean_poly.is_empty: continue
+                                shapely_polys.append(clean_poly)
                             except: pass
+
+                # --- APPLY BRIDGES (ISLAND FIX) ---
+                if is_stencil:
+                     bridge_w = self.exp_bridge.get()
+                     if bridge_w > 0:
+                         shapely_polys = self.apply_stencil_bridges(shapely_polys, bridge_w)
+                # ----------------------------------
 
                 scene_mesh = trimesh.Trimesh()
 
@@ -804,9 +994,12 @@ class CamoStudioApp:
                     
                     final_shape = plate_poly
                     if shapely_polys:
-                        blobs = unary_union(shapely_polys)
-                        final_shape = plate_poly.difference(blobs)
-                    
+                        try:
+                            blobs = unary_union(shapely_polys)
+                            final_shape = plate_poly.difference(blobs)
+                        except Exception as e:
+                            print(f"Boolean diff failed: {e}")
+
                     polys_to_extrude = []
                     if isinstance(final_shape, MultiPolygon):
                         for geom in final_shape.geoms: polys_to_extrude.append(geom)
@@ -814,6 +1007,8 @@ class CamoStudioApp:
                         polys_to_extrude.append(final_shape)
                         
                     for p in polys_to_extrude:
+                        if not p.is_valid: p = p.buffer(0)
+                        if p.is_empty: continue
                         mesh_part = trimesh.creation.extrude_polygon(p, height=extrusion)
                         scene_mesh += mesh_part
 
@@ -827,6 +1022,8 @@ class CamoStudioApp:
                             polys_to_extrude.append(combined_poly)
                         
                         for p in polys_to_extrude:
+                            if not p.is_valid: p = p.buffer(0)
+                            if p.is_empty: continue
                             mesh_part = trimesh.creation.extrude_polygon(p, height=extrusion)
                             scene_mesh += mesh_part
 
