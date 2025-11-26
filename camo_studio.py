@@ -196,7 +196,7 @@ def create_guide_image(centers, filename):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v33 - Kerf & Reg Marks")
+        self.root.title("Camo Studio v34 - Digital Camo & Management")
         self.root.geometry("1200x850")
         
         self.settings_file = "user_settings.json"
@@ -209,7 +209,8 @@ class CamoStudioApp:
             "min_blob_size": tk.IntVar(value=DEFAULT_MIN_BLOB),
             "filename_template": tk.StringVar(value=DEFAULT_TEMPLATE),
             "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING),
-            "orphaned_blobs": tk.BooleanVar(value=False) 
+            "orphaned_blobs": tk.BooleanVar(value=False),
+            "pixelate": tk.BooleanVar(value=False) # NEW
         }
         
         # 3D Export Vars
@@ -319,7 +320,7 @@ class CamoStudioApp:
         self.root.bind("<Control-Shift-O>", lambda e: self.load_project_json())
         self.root.bind("<Control-p>", self.trigger_process)
         self.root.bind("<Control-y>", self.yolo_scan) 
-        self.root.bind("<Control-e>", self.open_2d_export_window) # Changed binding
+        self.root.bind("<Control-e>", self.open_2d_export_window) 
         self.root.bind("<Control-comma>", self.open_config_window)
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-Z>", lambda e: self.redo()) 
@@ -763,6 +764,11 @@ class CamoStudioApp:
         tk.Entry(form, textvariable=self.config["max_colors"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Denoise Strength:").grid(row=row, column=0, sticky="w")
         tk.Scale(form, from_=0, to=20, orient=tk.HORIZONTAL, variable=self.config["denoise_strength"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        
+        # NEW: PIXELATE CHECKBOX
+        tk.Label(form, text="Digital Camo Mode:").grid(row=row, column=0, sticky="w")
+        tk.Checkbutton(form, text="Pixelate (Blocky style)", variable=self.config["pixelate"]).grid(row=row, column=1, sticky="w", pady=5); row+=1
+        
         tk.Label(form, text="Path Smoothing:").grid(row=row, column=0, sticky="w")
         tk.Scale(form, from_=0.0001, to=0.005, resolution=0.0001, orient=tk.HORIZONTAL, variable=self.config["smoothing"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Label(form, text="Lower = More Detail. Higher = Smoother.", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
@@ -1025,6 +1031,34 @@ class CamoStudioApp:
         else:
             self.last_select_index = index
 
+    def move_selected_items(self, direction):
+        # direction: -1 for up, 1 for down
+        if not self.picked_colors: return
+        
+        indices = [i for i, var in enumerate(self.select_vars) if var.get()]
+        if not indices: return
+        
+        self.push_undo_state()
+        
+        # Sort indices to handle multiple moves correctly
+        indices.sort(reverse=(direction > 0))
+        
+        limit = len(self.picked_colors)
+        
+        for i in indices:
+            target = i + direction
+            
+            # Bounds check
+            if target < 0 or target >= limit:
+                continue
+            
+            # Swap i and target
+            self.picked_colors[i], self.picked_colors[target] = self.picked_colors[target], self.picked_colors[i]
+            self.layer_vars[i], self.layer_vars[target] = self.layer_vars[target], self.layer_vars[i]
+            self.select_vars[i], self.select_vars[target] = self.select_vars[target], self.select_vars[i]
+            
+        self.update_pick_ui()
+
     def update_pick_ui(self):
         for widget in self.swatch_list_frame.winfo_children():
             widget.destroy()
@@ -1034,6 +1068,13 @@ class CamoStudioApp:
         h_frame = tk.Frame(self.swatch_list_frame, bg="#f0f0f0")
         h_frame.pack(fill="x", pady=2)
         tk.Label(h_frame, text="Sel", bg="#f0f0f0", font=("Arial", 7)).pack(side=tk.LEFT, padx=2)
+        
+        # NEW: Up/Down Arrows
+        btn_up = tk.Button(h_frame, text="↑", command=lambda: self.move_selected_items(-1), font=("Arial", 7), padx=2, pady=0)
+        btn_up.pack(side=tk.LEFT, padx=2)
+        btn_down = tk.Button(h_frame, text="↓", command=lambda: self.move_selected_items(1), font=("Arial", 7), padx=2, pady=0)
+        btn_down.pack(side=tk.LEFT, padx=2)
+        
         tk.Label(h_frame, text="Color", bg="#f0f0f0", font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=5)
         btn_sort = tk.Button(h_frame, text="Resort", command=lambda: [self.reorder_palette_by_similarity(), self.update_pick_ui()], font=("Arial", 7), padx=2, pady=0)
         btn_sort.pack(side=tk.RIGHT, padx=2)
@@ -1069,7 +1110,8 @@ class CamoStudioApp:
             "denoise_strength": self.config["denoise_strength"].get(),
             "min_blob_size": self.config["min_blob_size"].get(),
             "orphaned_blobs": self.config["orphaned_blobs"].get(),
-            "smoothing": self.config["smoothing"].get()
+            "smoothing": self.config["smoothing"].get(),
+            "pixelate": self.config["pixelate"].get() # New config
         }
         snapshot_colors = list(self.picked_colors)
         snapshot_layers = [v.get() for v in self.layer_vars]
@@ -1083,10 +1125,23 @@ class CamoStudioApp:
             if max_w and w > max_w:
                 scale = max_w / w
                 img = cv2.resize(img, (max_w, int(h * scale)), interpolation=cv2.INTER_AREA)
-            denoise_val = config["denoise_strength"]
-            if denoise_val > 0:
-                k = denoise_val if denoise_val % 2 == 1 else denoise_val + 1
-                img = cv2.GaussianBlur(img, (k, k), 0)
+                
+            # --- NEW: PIXELATE OR BLUR ---
+            if config.get("pixelate", False):
+                # Use denoise_strength as block size factor (min 2)
+                block_size = max(2, int(config["denoise_strength"] * 2))
+                # Downscale
+                small_h, small_w = h // block_size, w // block_size
+                if small_h > 0 and small_w > 0:
+                    small = cv2.resize(img, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
+                    # Upscale
+                    img = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+            else:
+                denoise_val = config["denoise_strength"]
+                if denoise_val > 0:
+                    k = denoise_val if denoise_val % 2 == 1 else denoise_val + 1
+                    img = cv2.GaussianBlur(img, (k, k), 0)
+                    
             h, w = img.shape[:2]
             data = img.reshape((-1, 3)).astype(np.float32)
             raw_masks = []
@@ -1117,8 +1172,12 @@ class CamoStudioApp:
             total_coverage_mask = np.zeros((h, w), dtype=np.uint8) 
             min_blob = config["min_blob_size"]
             kernel = None
-            if denoise_val > 0:
-                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (denoise_val, denoise_val))
+            
+            # Apply morph only if NOT pixelating (or minimal) to keep edges sharp
+            if not config.get("pixelate", False):
+                denoise_val = config["denoise_strength"]
+                if denoise_val > 0:
+                    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (denoise_val, denoise_val))
 
             if len(picked_colors) > 0:
                 layer_map = {} 
