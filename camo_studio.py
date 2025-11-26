@@ -14,11 +14,11 @@ from shapely.geometry import Polygon, MultiPolygon, LineString
 from shapely.ops import unary_union, nearest_points
 
 # --- DEFAULTS ---
-DEFAULT_MAX_COLORS = 3
-DEFAULT_MAX_WIDTH = 4096
-DEFAULT_SMOOTHING = 0.0001 
-DEFAULT_DENOISE = 3
-DEFAULT_MIN_BLOB = 100
+DEFAULT_MAX_COLORS = 4
+DEFAULT_MAX_WIDTH = 1000
+DEFAULT_SMOOTHING = 0.0005 
+DEFAULT_DENOISE = 5
+DEFAULT_MIN_BLOB = 50
 DEFAULT_TEMPLATE = "%INPUTFILENAME%-%COLOR%-%INDEX%"
 
 def bgr_to_hex(bgr):
@@ -48,7 +48,9 @@ class AutoResizingCanvas(tk.Canvas):
         self.bind("<Configure>", self.on_resize)
 
     def on_resize(self, event):
-        if not self.pil_image: return
+        if not self.pil_image: 
+            self.delete("all")
+            return
         canvas_width = event.width
         canvas_height = event.height
         if canvas_width < 10 or canvas_height < 10: return
@@ -59,6 +61,7 @@ class AutoResizingCanvas(tk.Canvas):
         new_w = int(img_w * self.scale_ratio)
         new_h = int(img_h * self.scale_ratio)
         
+        # Use Nearest for speed if vector preview (crisp lines), Lanczos for photos
         resized_pil = self.pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
         self.displayed_image = ImageTk.PhotoImage(resized_pil)
         
@@ -81,14 +84,12 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v29 - Persistent Config")
+        self.root.title("Camo Studio v30 - Vector View Toggle")
         self.root.geometry("1200x850")
         
-        # --- 1. Define Settings File & Directory Memory ---
         self.settings_file = "user_settings.json"
         self.last_opened_dir = os.getcwd()
 
-        # --- 2. Initialize Variables with Defaults ---
         self.config = {
             "max_colors": tk.IntVar(value=DEFAULT_MAX_COLORS),
             "max_width": tk.IntVar(value=DEFAULT_MAX_WIDTH),
@@ -99,7 +100,6 @@ class CamoStudioApp:
             "orphaned_blobs": tk.BooleanVar(value=False) 
         }
         
-        # 3D Export Vars
         self.exp_units = tk.StringVar(value="mm")
         self.exp_width = tk.DoubleVar(value=100.0)
         self.exp_height = tk.DoubleVar(value=2.0) 
@@ -107,44 +107,39 @@ class CamoStudioApp:
         self.exp_bridge = tk.DoubleVar(value=2.0)
         self.exp_invert = tk.BooleanVar(value=True)
         
-        # --- 3. Load Persistent Settings ---
         self.load_app_settings()
         
         self.original_image_path = None
         self.cv_original_full = None 
         self.current_base_name = "camo"
         
-        # State
         self.picked_colors = [] 
         self.layer_vars = []
         self.select_vars = [] 
         self.bulk_target_layer = tk.IntVar(value=1)
         self.last_select_index = -1 
+        
         self.processed_data = None 
-        self.preview_images = {}
+        
+        # New: State for toggle
+        self.view_vector = tk.BooleanVar(value=False)
+        self.result_canvases = [] 
 
         self._create_ui()
         self._bind_shortcuts()
         
-        # --- 4. Bind Close Event to Save ---
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def load_app_settings(self):
-        """Loads configuration and last directory from JSON on startup."""
         if not os.path.exists(self.settings_file): return
         try:
             with open(self.settings_file, 'r') as f:
                 data = json.load(f)
-            
-            # Load Config Dict
             cfg = data.get("config", {})
             for k, v in cfg.items():
                 if k in self.config:
-                    try:
-                        self.config[k].set(v)
+                    try: self.config[k].set(v)
                     except: pass
-            
-            # Load Export Settings
             exp = data.get("export", {})
             self.exp_units.set(exp.get("units", "mm"))
             self.exp_width.set(exp.get("width", 100.0))
@@ -152,19 +147,13 @@ class CamoStudioApp:
             self.exp_border.set(exp.get("border", 5.0))
             self.exp_bridge.set(exp.get("bridge", 2.0))
             self.exp_invert.set(exp.get("invert", True))
-            
-            # Load Last Directory
             last_dir = data.get("last_directory", "")
             if last_dir and os.path.exists(last_dir):
                 self.last_opened_dir = last_dir
-                
-            print("Settings loaded successfully.")
-                
         except Exception as e:
             print(f"Failed to load settings: {e}")
 
     def save_app_settings(self):
-        """Saves current configuration and directory to JSON."""
         data = {
             "config": {k: v.get() for k, v in self.config.items()},
             "export": {
@@ -180,12 +169,10 @@ class CamoStudioApp:
         try:
             with open(self.settings_file, 'w') as f:
                 json.dump(data, f, indent=4)
-            print("Settings saved.")
         except Exception as e:
             print(f"Failed to save settings: {e}")
 
     def on_close(self):
-        """Handler for window close event."""
         self.save_app_settings()
         self.root.destroy()
 
@@ -211,7 +198,7 @@ class CamoStudioApp:
         file_menu.add_command(label="Export SVG Bundle (Ctrl+E)", command=self.export_bundle_2d)
         file_menu.add_command(label="Export STL Models (Ctrl+Shift+E)", command=self.open_3d_export_window)
         file_menu.add_separator()
-        file_menu.add_command(label="Exit", command=self.on_close) # Use on_close here too
+        file_menu.add_command(label="Exit", command=self.on_close)
         menubar.add_cascade(label="File", menu=file_menu)
         
         prop_menu = tk.Menu(menubar, tearoff=0)
@@ -224,6 +211,10 @@ class CamoStudioApp:
         tk.Label(self.toolbar, text="Pick Colors -> Assign Layers -> Process -> Export", bg="#ddd", fg="#555").pack(side=tk.LEFT)
         self.btn_process = tk.Button(self.toolbar, text="PROCESS IMAGE", command=self.trigger_process, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"))
         self.btn_process.pack(side=tk.RIGHT, padx=10)
+        
+        # --- TOGGLE BUTTON ---
+        self.chk_vector = tk.Checkbutton(self.toolbar, text="Show Vector Output", variable=self.view_vector, command=self.refresh_tab_images, bg="#ddd", font=("Arial", 9, "bold"))
+        self.chk_vector.pack(side=tk.RIGHT, padx=10)
 
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(expand=True, fill="both", padx=10, pady=5)
@@ -279,7 +270,6 @@ class CamoStudioApp:
         self.canvas_frame = tk.Frame(self.input_container, bg="#333")
         self.canvas_frame.pack(side=tk.LEFT, fill="both", expand=True)
         
-        # --- OPEN BUTTON CENTERED ---
         self.btn_main_load = tk.Button(self.canvas_frame, text="OPEN IMAGE", command=lambda: self.load_image(),
                                        font=("Arial", 16, "bold"), bg="#555", fg="white", padx=20, pady=10, cursor="hand2")
         self.btn_main_load.place(relx=0.5, rely=0.5, anchor="center")
@@ -354,44 +344,31 @@ class CamoStudioApp:
         tk.Button(form, text="Export STL Files", command=lambda: self.trigger_3d_export(win), bg="blue", fg="white").pack(pady=20, fill="x")
 
     def trigger_3d_export(self, parent_window):
-        # Update directory from dialog
         target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
         if not target_dir: return
-        self.last_opened_dir = target_dir # Remember this dir
-        
+        self.last_opened_dir = target_dir 
         parent_window.destroy()
         self.progress['mode'] = 'determinate'
         self.progress_var.set(0)
         threading.Thread(target=self.export_3d_thread, args=(target_dir,)).start()
 
     def reset_project(self):
-        """Clears all data and UI to start fresh."""
         if self.picked_colors and not messagebox.askyesno("New Project", "Discard current changes?"):
             return
-        
         self.original_image_path = None
         self.cv_original_full = None
         self.current_base_name = "camo"
-        
-        # Clear Data
         self.picked_colors = []
         self.layer_vars = []
         self.select_vars = []
         self.last_select_index = -1
         self.processed_data = None
-        self.preview_images = {}
-        
-        # Clear UI
         self.update_pick_ui()
         if self.main_canvas: 
             self.main_canvas.destroy()
             self.main_canvas = None
-        
-        # Remove extra tabs
         for tab in self.notebook.tabs():
             if tab != str(self.tab_main): self.notebook.forget(tab)
-            
-        # Show Open Button
         self.btn_main_load.place(relx=0.5, rely=0.5, anchor="center")
         self.lbl_status.config(text="Project cleared.")
 
@@ -399,11 +376,8 @@ class CamoStudioApp:
         path = from_path
         if not path:
             path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
-        
         if not path: return
-        self.last_opened_dir = os.path.dirname(path) # Remember this dir
-        
-        # If file not found (e.g. moved project file)
+        self.last_opened_dir = os.path.dirname(path)
         if not os.path.exists(path):
             messagebox.showerror("Error", f"Image file not found:\n{path}\nPlease locate it manually.")
             path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
@@ -415,29 +389,20 @@ class CamoStudioApp:
         self.cv_original_full = cv2.imread(path)
         rgb_img = cv2.cvtColor(self.cv_original_full, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb_img)
-        
-        # Hide the center button
         self.btn_main_load.place_forget()
-        
         if self.main_canvas: self.main_canvas.destroy()
         self.main_canvas = AutoResizingCanvas(self.canvas_frame, pil_image=pil_img, bg="#333", highlightthickness=0)
         self.main_canvas.pack(fill="both", expand=True)
         self.main_canvas.bind("<Button-1>", self.on_canvas_click)
-        
-        # Only reset picks if we are doing a manual load, not a project load
         if from_path is None:
             self.reset_picks()
-            
         self.lbl_status.config(text=f"Loaded: {os.path.basename(path)}")
 
     def save_project_json(self):
         if not self.original_image_path:
             messagebox.showwarning("Warning", "No image loaded to save.")
             return
-
-        # Sanitize colors: Convert numpy.uint8 to standard python int
         sanitized_colors = [tuple(int(x) for x in c) for c in self.picked_colors]
-
         data = {
             "version": "1.0",
             "image_path": self.original_image_path,
@@ -453,10 +418,9 @@ class CamoStudioApp:
                 "invert": self.exp_invert.get()
             }
         }
-        
         path = filedialog.asksaveasfilename(initialdir=self.last_opened_dir, defaultextension=".json", filetypes=[("Camo Project", "*.json")])
         if path:
-            self.last_opened_dir = os.path.dirname(path) # Remember this dir
+            self.last_opened_dir = os.path.dirname(path)
             try:
                 with open(path, 'w') as f:
                     json.dump(data, f, indent=4)
@@ -467,27 +431,18 @@ class CamoStudioApp:
     def load_project_json(self):
         if self.picked_colors and not messagebox.askyesno("Open Project", "Discard current changes?"):
             return
-
         path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Camo Project", "*.json")])
         if not path: return
-        self.last_opened_dir = os.path.dirname(path) # Remember this dir
-        
+        self.last_opened_dir = os.path.dirname(path)
         try:
             with open(path, 'r') as f:
                 data = json.load(f)
-            
-            # 1. Load Image
             self.load_image(from_path=data.get("image_path"))
-            
-            # 2. Restore Config
             if "config" in data:
                 for k, v in data["config"].items():
                     if k in self.config:
-                        try:
-                            self.config[k].set(v)
+                        try: self.config[k].set(v)
                         except: pass
-            
-            # 3. Restore 3D Settings
             if "3d_export" in data:
                 ex = data["3d_export"]
                 self.exp_units.set(ex.get("units", "mm"))
@@ -496,22 +451,16 @@ class CamoStudioApp:
                 self.exp_border.set(ex.get("border", 5.0))
                 self.exp_bridge.set(ex.get("bridge", 2.0))
                 self.exp_invert.set(ex.get("invert", True))
-
-            # 4. Restore Palette & Layers
             self.picked_colors = [tuple(c) for c in data.get("colors", [])]
             saved_layers = data.get("layers", [])
-            
             self.layer_vars = []
             self.select_vars = []
-            
             for i in range(len(self.picked_colors)):
                 lid = saved_layers[i] if i < len(saved_layers) else 1
                 self.layer_vars.append(tk.IntVar(value=lid))
                 self.select_vars.append(tk.BooleanVar(value=False))
-                
             self.update_pick_ui()
             self.lbl_status.config(text=f"Project loaded: {os.path.basename(path)}")
-            
         except Exception as e:
             messagebox.showerror("Load Error", f"Failed to load project:\n{str(e)}")
 
@@ -519,11 +468,9 @@ class CamoStudioApp:
         if self.cv_original_full is None: 
             messagebox.showinfo("Info", "Load an image first.")
             return
-            
         if self.picked_colors:
             if not messagebox.askyesno("YOLO Mode", "This will replace your current palette. Continue?"):
                 return
-
         self.picked_colors = []
         self.layer_vars = []
         self.select_vars = []
@@ -534,12 +481,9 @@ class CamoStudioApp:
         if w > max_analysis_w:
             scale = max_analysis_w / w
             img = cv2.resize(img, (max_analysis_w, int(h * scale)), interpolation=cv2.INTER_AREA)
-            
         data = img.reshape((-1, 3)).astype(np.float32)
-        
         unique_colors = np.unique(data.astype(np.uint8), axis=0)
         final_colors = []
-        
         if len(unique_colors) <= 64:
             print(f"YOLO: Found {len(unique_colors)} unique colors. Using Exact.")
             final_colors = [tuple(int(x) for x in c) for c in unique_colors]
@@ -549,10 +493,8 @@ class CamoStudioApp:
             ret, label, center = cv2.kmeans(data, 32, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
             center = np.uint8(center)
             final_colors = [tuple(int(x) for x in c) for c in center]
-            
         self.picked_colors = final_colors
         self.reorder_palette_by_similarity()
-        
         target_layers = self.config["max_colors"].get()
         if len(self.picked_colors) > target_layers:
             print(f"YOLO: Grouping {len(self.picked_colors)} colors into {target_layers} layers.")
@@ -569,7 +511,6 @@ class CamoStudioApp:
             for i, cluster_idx in enumerate(labels.flatten()):
                 new_layer_id = cluster_to_layer_map[cluster_idx]
                 self.layer_vars[i].set(new_layer_id)
-
         self.update_pick_ui()
         self.lbl_status.config(text=f"YOLO Mode: {len(self.picked_colors)} colors grouped into {target_layers} layers.")
 
@@ -597,25 +538,20 @@ class CamoStudioApp:
              self.layer_vars.append(tk.IntVar(value=next_id))
         while len(self.select_vars) < len(self.picked_colors):
              self.select_vars.append(tk.BooleanVar(value=False))
-
         groups = {}
         for i, color in enumerate(self.picked_colors):
             lid = self.layer_vars[i].get()
             if lid not in groups: groups[lid] = []
             groups[lid].append({'color': color, 'var': self.layer_vars[i], 'select': self.select_vars[i]})
-
         group_metrics = []
         for lid, items in groups.items():
             avg_b = np.mean([sum(x['color']) for x in items])
             group_metrics.append({'lid': lid, 'brightness': avg_b, 'items': items})
-        
         group_metrics.sort(key=lambda x: x['brightness'], reverse=True)
-
         new_colors = []
         new_layer_vars = []
         new_select_vars = []
         current_layer_num = 1
-        
         for g in group_metrics:
             items = g['items']
             items.sort(key=lambda x: sum(x['color']), reverse=True)
@@ -624,7 +560,6 @@ class CamoStudioApp:
                 new_layer_vars.append(tk.IntVar(value=current_layer_num))
                 new_select_vars.append(item['select'])
             current_layer_num += 1
-
         self.picked_colors = new_colors
         self.layer_vars = new_layer_vars
         self.select_vars = new_select_vars
@@ -717,20 +652,16 @@ class CamoStudioApp:
         self.lbl_status.config(text="Processing...")
         self.progress['mode'] = 'indeterminate'
         self.progress.start(10)
-        
-        # Snapshot config to avoid thread safety issues
         snapshot_config = {
             "max_width": self.config["max_width"].get(),
             "max_colors": self.config["max_colors"].get(),
             "denoise_strength": self.config["denoise_strength"].get(),
             "min_blob_size": self.config["min_blob_size"].get(),
-            "orphaned_blobs": self.config["orphaned_blobs"].get()
+            "orphaned_blobs": self.config["orphaned_blobs"].get(),
+            "smoothing": self.config["smoothing"].get()
         }
-        
-        # Snapshot lists
         snapshot_colors = list(self.picked_colors)
         snapshot_layers = [v.get() for v in self.layer_vars]
-        
         threading.Thread(target=self.process_thread, args=(self.cv_original_full, snapshot_config, snapshot_colors, snapshot_layers)).start()
 
     def process_thread(self, img_original, config, picked_colors, layer_ids):
@@ -741,19 +672,15 @@ class CamoStudioApp:
             if max_w and w > max_w:
                 scale = max_w / w
                 img = cv2.resize(img, (max_w, int(h * scale)), interpolation=cv2.INTER_AREA)
-
             denoise_val = config["denoise_strength"]
             if denoise_val > 0:
                 k = denoise_val if denoise_val % 2 == 1 else denoise_val + 1
                 img = cv2.GaussianBlur(img, (k, k), 0)
-
             h, w = img.shape[:2]
             data = img.reshape((-1, 3)).astype(np.float32)
-
             raw_masks = []
             raw_centers = []
             
-            # 1. Determine Colors (Auto vs Manual)
             if len(picked_colors) > 0:
                 centers = np.array(picked_colors, dtype=np.float32)
                 distances = np.zeros((data.shape[0], len(centers)), dtype=np.float32)
@@ -770,148 +697,165 @@ class CamoStudioApp:
                 labels_reshaped = label.flatten().reshape((h, w))
                 num_raw_colors = len(raw_centers)
 
-            # 2. Generate Raw Masks
             for i in range(num_raw_colors):
                 mask = cv2.inRange(labels_reshaped, i, i)
                 raw_masks.append(mask)
 
             final_masks = []
             final_centers = []
-            total_coverage_mask = np.zeros((h, w), dtype=np.uint8) # Accumulator for optimization
-            
+            total_coverage_mask = np.zeros((h, w), dtype=np.uint8) 
             min_blob = config["min_blob_size"]
             kernel = None
             if denoise_val > 0:
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (denoise_val, denoise_val))
 
-            # 3. Merge & Filter Layers
             if len(picked_colors) > 0:
-                # Group by Layer ID
                 layer_map = {} 
                 for idx, lid in enumerate(layer_ids):
                     if lid not in layer_map: layer_map[lid] = []
                     layer_map[lid].append(idx)
-                
                 sorted_layer_ids = sorted(layer_map.keys())
-                
                 for lid in sorted_layer_ids:
                     indices = layer_map[lid]
                     combined_mask = np.zeros((h, w), dtype=np.uint8)
                     avg_color = np.zeros(3, dtype=np.float32)
-                    
                     for idx in indices:
                         combined_mask = cv2.bitwise_or(combined_mask, raw_masks[idx])
                         avg_color += raw_centers[idx]
-                    
                     avg_color = (avg_color / len(indices)).astype(np.uint8)
-                    
                     if kernel is not None:
                         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
                         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
-                    
-                    # Optimize: Use raster filtering instead of vector filtering
                     filtered = filter_small_blobs(combined_mask, min_blob)
                     final_masks.append(filtered)
                     final_centers.append(avg_color)
-                    
-                    # Accumulate coverage
                     total_coverage_mask = cv2.bitwise_or(total_coverage_mask, filtered)
-
             else:
-                # Auto Mode
                 for i, mask in enumerate(raw_masks):
                     if kernel is not None:
                         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
                         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-                    
                     filtered = filter_small_blobs(mask, min_blob)
                     final_masks.append(filtered)
-                    
-                    # Accumulate coverage
                     total_coverage_mask = cv2.bitwise_or(total_coverage_mask, filtered)
-                final_centers = raw_centers
+                final_centers = list(raw_centers)
 
-            # 4. Orphaned Blobs (Optimized)
             if config["orphaned_blobs"]:
                 orphans = cv2.bitwise_not(total_coverage_mask)
-                
                 if kernel is not None:
                     orphans = cv2.morphologyEx(orphans, cv2.MORPH_OPEN, kernel)
                     orphans = cv2.morphologyEx(orphans, cv2.MORPH_CLOSE, kernel)
-
                 orphans_final = filter_small_blobs(orphans, min_blob)
-
                 if cv2.countNonZero(orphans_final) > 0:
-                    # Safety break for color picking to avoid infinite loop
                     attempts = 0
-                    rand_c = np.array([0, 255, 0], dtype=np.uint8) # Default green if search fails
-                    
+                    rand_c = np.array([0, 255, 0], dtype=np.uint8) 
                     while attempts < 50:
                         attempts += 1
                         candidate = np.random.randint(0, 256, 3).astype(np.uint8)
                         dists = [np.sum((c - candidate)**2) for c in final_centers]
-                        
-                        # Adaptive threshold: if crowded (many layers), accept lower contrast
                         threshold = 2000 if len(final_centers) < 10 else 500
-                        
                         if not dists or min(dists) > threshold: 
                             rand_c = candidate
                             break
-                    
                     final_masks.append(orphans_final)
                     final_centers.append(rand_c)
                     print("Added Orphaned Blobs layer.")
 
-            self.processed_data = {
+            # --- GENERATE PREVIEWS (RASTER) ---
+            previews_raster = {}
+            combined_raster = np.ones((h, w, 3), dtype=np.uint8) * 255
+            for i, mask in enumerate(final_masks):
+                color = final_centers[i]
+                combined_raster[mask == 255] = color
+                layer_img = np.ones((h, w, 3), dtype=np.uint8) * 255
+                layer_img[mask == 255] = color
+                previews_raster[i] = Image.fromarray(cv2.cvtColor(layer_img, cv2.COLOR_BGR2RGB))
+            previews_raster["All"] = Image.fromarray(cv2.cvtColor(combined_raster, cv2.COLOR_BGR2RGB))
+
+            # --- GENERATE PREVIEWS (VECTOR) ---
+            previews_vector = {}
+            combined_vector = np.ones((h, w, 3), dtype=np.uint8) * 255
+            smoothing = config["smoothing"]
+            
+            for i, mask in enumerate(final_masks):
+                color_tuple = (int(final_centers[i][0]), int(final_centers[i][1]), int(final_centers[i][2]))
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                polys = []
+                for c in contours:
+                    epsilon = smoothing * cv2.arcLength(c, True)
+                    approx = cv2.approxPolyDP(c, epsilon, True)
+                    polys.append(approx)
+                
+                cv2.drawContours(combined_vector, polys, -1, color_tuple, -1)
+                
+                layer_vector_img = np.ones((h, w, 3), dtype=np.uint8) * 255
+                cv2.drawContours(layer_vector_img, polys, -1, color_tuple, -1)
+                previews_vector[i] = Image.fromarray(cv2.cvtColor(layer_vector_img, cv2.COLOR_BGR2RGB))
+                
+            previews_vector["All"] = Image.fromarray(cv2.cvtColor(combined_vector, cv2.COLOR_BGR2RGB))
+
+            processed_data = {
                 "centers": final_centers,
                 "masks": final_masks,
                 "width": w,
-                "height": h
+                "height": h,
+                "raster_previews": previews_raster,
+                "vector_previews": previews_vector
             }
-            self.root.after(0, lambda: self._generate_previews(final_centers, final_masks, w, h))
-            self.root.after(0, self.update_ui_after_process)
+            self.root.after(0, lambda: self.finish_processing(processed_data))
 
         except Exception as e:
             print(e)
             self.root.after(0, self.progress.stop)
 
-    def _generate_previews(self, centers, masks, w, h):
-        combined = np.ones((h, w, 3), dtype=np.uint8) * 255
-        for i, mask in enumerate(masks):
-            combined[mask == 255] = centers[i]
-        self.preview_images["All"] = Image.fromarray(cv2.cvtColor(combined, cv2.COLOR_BGR2RGB))
-        for i, mask in enumerate(masks):
-            layer = np.ones((h, w, 3), dtype=np.uint8) * 255
-            layer[mask == 255] = centers[i]
-            self.preview_images[i] = Image.fromarray(cv2.cvtColor(layer, cv2.COLOR_BGR2RGB))
-
-    def update_ui_after_process(self):
+    def finish_processing(self, data):
+        self.processed_data = data
         self.progress.stop()
         self.progress['mode'] = 'determinate'
         self.progress_var.set(100)
         self.lbl_status.config(text="Processing Complete.")
+        
         for tab in self.notebook.tabs():
             if tab != str(self.tab_main): self.notebook.forget(tab)
-        self._add_tab("Combined Result", self.preview_images["All"])
-        centers = self.processed_data["centers"]
+        self.result_canvases = [] 
+        
+        self._add_tab("Combined Result", "All")
+        centers = data["centers"]
         for i in range(len(centers)):
             hex_c = bgr_to_hex(centers[i])
-            self._add_tab(f"L{i+1} {hex_c}", self.preview_images[i])
+            self._add_tab(f"L{i+1} {hex_c}", i)
+            
+        self.refresh_tab_images()
         self.notebook.select(1)
 
-    def _add_tab(self, title, pil_image):
+    def _add_tab(self, title, image_key):
         frame = tk.Frame(self.notebook, bg="#333")
         self.notebook.add(frame, text=title)
-        canvas = AutoResizingCanvas(frame, pil_image=pil_image, bg="#333", highlightthickness=0)
+        canvas = AutoResizingCanvas(frame, pil_image=None, bg="#333", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
+        self.result_canvases.append((canvas, image_key))
+
+    def refresh_tab_images(self):
+        if not self.processed_data: return
+        is_vector = self.view_vector.get()
+        source = self.processed_data["vector_previews"] if is_vector else self.processed_data["raster_previews"]
+        
+        for canvas, key in self.result_canvases:
+            if key in source:
+                canvas.pil_image = source[key]
+                # Force redraw by mocking a configure event with current size
+                w = canvas.winfo_width()
+                h = canvas.winfo_height()
+                if w > 1 and h > 1:
+                    class MockEvent:
+                        def __init__(self, w, h): self.width, self.height = w, h
+                    canvas.on_resize(MockEvent(w, h))
 
     def export_bundle_2d(self, event=None):
         if not self.processed_data: return
-        # Update directory from dialog
         target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
         if not target_dir: return
-        self.last_opened_dir = target_dir # Remember this dir
-        
+        self.last_opened_dir = target_dir 
         self.progress['mode'] = 'determinate'
         self.progress_var.set(0)
         threading.Thread(target=self.export_2d_thread, args=(target_dir,)).start()
@@ -932,7 +876,6 @@ class CamoStudioApp:
                 fname = tmpl.replace("%INPUTFILENAME%", self.current_base_name).replace("%COLOR%", hex_c.replace("#","")).replace("%INDEX%", str(i+1))
                 if not fname.endswith(".svg"): fname += ".svg"
                 path = os.path.join(target_dir, fname)
-                
                 dwg = svgwrite.Drawing(path, profile='tiny', size=(width, height))
                 contours, _ = cv2.findContours(masks[i], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 for c in contours:
@@ -954,48 +897,27 @@ class CamoStudioApp:
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
 
     def apply_stencil_bridges(self, polys, bridge_width):
-        """
-        Iterates through polygons. If a polygon has a hole (interior),
-        it creates a bridge (cut) connecting the interior to the exterior,
-        anchoring the island to the main frame.
-        """
         bridged_polys = []
-        
         for poly in polys:
             if not poly.is_valid: poly = poly.buffer(0)
-            
-            # If the polygon has no holes, it's safe (no floating islands)
             if len(poly.interiors) == 0:
                 bridged_polys.append(poly)
                 continue
-
-            # It has holes! We need to anchor the islands inside.
             temp_poly = poly
-            
             for interior in poly.interiors:
-                # 1. Find the shortest distance between the inner island and the outer frame
                 p1, p2 = nearest_points(temp_poly.exterior, interior)
-                
-                # 2. Create a line connecting them
                 bridge_line = LineString([p1, p2])
-                
-                # 3. Thicken the line into a rectangle (The Bridge)
                 bridge_shape = bridge_line.buffer(bridge_width / 2)
-                
-                # 4. Subtract the bridge from the polygon (Cutting the ring)
                 try:
                     temp_poly = temp_poly.difference(bridge_shape)
                     if not temp_poly.is_valid: temp_poly = temp_poly.buffer(0)
                 except Exception as e:
                     print(f"Bridge failed on one island: {e}")
-            
-            # Handle case where difference returns a MultiPolygon (if we cut it in half)
             if isinstance(temp_poly, MultiPolygon):
                 for geom in temp_poly.geoms:
                     bridged_polys.append(geom)
             else:
                 bridged_polys.append(temp_poly)
-                
         return bridged_polys
 
     def export_3d_thread(self, target_dir):
@@ -1006,12 +928,10 @@ class CamoStudioApp:
             orig_h = self.processed_data["height"]
             tmpl = self.config["filename_template"].get()
             smooth = self.config["smoothing"].get() 
-
             target_w = self.exp_width.get()
             extrusion = self.exp_height.get()
             border_w = self.exp_border.get()
             is_stencil = self.exp_invert.get()
-            
             scale = target_w / orig_w
             target_h = orig_h * scale
             
@@ -1019,7 +939,6 @@ class CamoStudioApp:
                 self.progress_var.set(((i+1)/len(centers))*100)
                 bgr = centers[i]
                 hex_c = bgr_to_hex(bgr)
-                
                 fname = tmpl.replace("%INPUTFILENAME%", self.current_base_name).replace("%COLOR%", hex_c.replace("#","")).replace("%INDEX%", str(i+1))
                 if is_stencil: fname += "_stencil"
                 fname += ".stl"
@@ -1027,7 +946,6 @@ class CamoStudioApp:
                 
                 contours, hierarchy = cv2.findContours(masks[i], cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
                 shapely_polys = []
-                
                 if hierarchy is not None:
                     hierarchy = hierarchy[0]
                     for j, c in enumerate(contours):
@@ -1035,10 +953,8 @@ class CamoStudioApp:
                             epsilon = smooth * cv2.arcLength(c, True)
                             approx = cv2.approxPolyDP(c, epsilon, True)
                             if len(approx) < 3: continue
-                            
                             outer_pts = approx.squeeze() * scale
                             outer_pts[:, 1] = target_h - outer_pts[:, 1] 
-                            
                             holes = []
                             current_child_idx = hierarchy[j][2]
                             while current_child_idx != -1:
@@ -1050,7 +966,6 @@ class CamoStudioApp:
                                     hole_pts[:, 1] = target_h - hole_pts[:, 1]
                                     holes.append(hole_pts)
                                 current_child_idx = hierarchy[current_child_idx][0]
-                            
                             try:
                                 poly = Polygon(shell=outer_pts, holes=holes)
                                 clean_poly = poly.buffer(0)
@@ -1058,20 +973,16 @@ class CamoStudioApp:
                                 shapely_polys.append(clean_poly)
                             except: pass
 
-                # --- APPLY BRIDGES (ISLAND FIX) ---
                 if is_stencil:
                      bridge_w = self.exp_bridge.get()
                      if bridge_w > 0:
                          shapely_polys = self.apply_stencil_bridges(shapely_polys, bridge_w)
-                # ----------------------------------
 
                 scene_mesh = trimesh.Trimesh()
-
                 if is_stencil:
                     min_x, min_y = -border_w, -border_w
                     max_x, max_y = target_w + border_w, target_h + border_w
                     plate_poly = Polygon([(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)])
-                    
                     final_shape = plate_poly
                     if shapely_polys:
                         try:
@@ -1079,19 +990,16 @@ class CamoStudioApp:
                             final_shape = plate_poly.difference(blobs)
                         except Exception as e:
                             print(f"Boolean diff failed: {e}")
-
                     polys_to_extrude = []
                     if isinstance(final_shape, MultiPolygon):
                         for geom in final_shape.geoms: polys_to_extrude.append(geom)
                     else:
                         polys_to_extrude.append(final_shape)
-                        
                     for p in polys_to_extrude:
                         if not p.is_valid: p = p.buffer(0)
                         if p.is_empty: continue
                         mesh_part = trimesh.creation.extrude_polygon(p, height=extrusion)
                         scene_mesh += mesh_part
-
                 else:
                     if shapely_polys:
                         combined_poly = unary_union(shapely_polys)
@@ -1100,13 +1008,11 @@ class CamoStudioApp:
                             for geom in combined_poly.geoms: polys_to_extrude.append(geom)
                         else:
                             polys_to_extrude.append(combined_poly)
-                        
                         for p in polys_to_extrude:
                             if not p.is_valid: p = p.buffer(0)
                             if p.is_empty: continue
                             mesh_part = trimesh.creation.extrude_polygon(p, height=extrusion)
                             scene_mesh += mesh_part
-
                     if border_w > 0:
                         outer_box = [[-border_w, -border_w], [target_w + border_w, -border_w],
                                      [target_w + border_w, target_h + border_w], [-border_w, target_h + border_w]]
@@ -1117,10 +1023,8 @@ class CamoStudioApp:
 
                 if not scene_mesh.is_empty:
                     scene_mesh.export(full_path)
-            
             self.root.after(0, lambda: messagebox.showinfo("Success", f"Exported 3D models to {target_dir}"))
             self.root.after(0, lambda: self.lbl_status.config(text="3D Export Complete."))
-            
         except Exception as e:
             print(e)
             err_msg = str(e)
