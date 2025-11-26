@@ -26,6 +26,22 @@ def bgr_to_hex(bgr):
 def is_bright(bgr):
     return (bgr[2] * 0.299 + bgr[1] * 0.587 + bgr[0] * 0.114) > 186
 
+def filter_small_blobs(mask, min_size):
+    """
+    Optimized area filtering using Connected Components (Raster).
+    """
+    if min_size <= 0: return mask
+    
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    
+    valid_labels = (stats[:, cv2.CC_STAT_AREA] >= min_size)
+    valid_labels[0] = False 
+    
+    lut = np.zeros(n, dtype=np.uint8)
+    lut[valid_labels] = 255
+    
+    return lut[labels]
+
 class AutoResizingCanvas(tk.Canvas):
     def __init__(self, parent, pil_image, **kwargs):
         super().__init__(parent, **kwargs)
@@ -70,7 +86,7 @@ class AutoResizingCanvas(tk.Canvas):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v22 - Orphaned Blobs")
+        self.root.title("Camo Studio v25 - Fixed Orphan Freeze")
         self.root.geometry("1200x850")
 
         self.config = {
@@ -80,7 +96,7 @@ class CamoStudioApp:
             "min_blob_size": tk.IntVar(value=DEFAULT_MIN_BLOB),
             "filename_template": tk.StringVar(value=DEFAULT_TEMPLATE),
             "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING),
-            "orphaned_blobs": tk.BooleanVar(value=False) # New Config
+            "orphaned_blobs": tk.BooleanVar(value=False) 
         }
         
         # 3D Export Vars
@@ -100,7 +116,6 @@ class CamoStudioApp:
         self.select_vars = [] 
         self.bulk_target_layer = tk.IntVar(value=1)
         
-        # Selection state for Shift+Click
         self.last_select_index = -1 
         
         self.processed_data = None 
@@ -223,7 +238,6 @@ class CamoStudioApp:
         tk.Label(form, text="Min Blob Size (px):").grid(row=row, column=0, sticky="w")
         tk.Entry(form, textvariable=self.config["min_blob_size"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         
-        # New Orphaned Blobs Feature
         tk.Label(form, text="Orphaned Blobs:").grid(row=row, column=0, sticky="w")
         tk.Checkbutton(form, text="Detect & Assign Random Color", variable=self.config["orphaned_blobs"]).grid(row=row, column=1, sticky="w", pady=5); row+=1
         tk.Label(form, text="(Captures white space/background as a new layer)", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
@@ -285,7 +299,6 @@ class CamoStudioApp:
         self.reset_picks()
         self.lbl_status.config(text="Image loaded.")
 
-    # --- YOLO MODE (UPDATED) ---
     def yolo_scan(self, event=None):
         if self.cv_original_full is None: 
             messagebox.showinfo("Info", "Load an image first.")
@@ -311,7 +324,6 @@ class CamoStudioApp:
         unique_colors = np.unique(data.astype(np.uint8), axis=0)
         final_colors = []
         
-        # 1. Get Raw Colors
         if len(unique_colors) <= 64:
             print(f"YOLO: Found {len(unique_colors)} unique colors. Using Exact.")
             final_colors = [tuple(c) for c in unique_colors]
@@ -323,36 +335,21 @@ class CamoStudioApp:
             final_colors = [tuple(c) for c in center]
             
         self.picked_colors = final_colors
-        
-        # 2. Initial Sort & Variable Creation (Assigns 1..N layers)
         self.reorder_palette_by_similarity()
         
-        # 3. SMART GROUPING (NEW)
         target_layers = self.config["max_colors"].get()
-        
-        # Only apply grouping if we have more colors than target layers
         if len(self.picked_colors) > target_layers:
             print(f"YOLO: Grouping {len(self.picked_colors)} colors into {target_layers} layers.")
-            
-            # A. Cluster the Palette itself
             palette_data = np.array(self.picked_colors, dtype=np.float32)
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
             ret, labels, centers = cv2.kmeans(palette_data, target_layers, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
-            
-            # B. Sort the Centers by Brightness (Lightest -> Darkest)
-            # This ensures Layer 1 is always the lightest group, Layer N is darkest
             centers_info = []
             for i, center in enumerate(centers):
                 centers_info.append( {'id': i, 'val': sum(center)} )
             centers_info.sort(key=lambda x: x['val'], reverse=True)
-            
-            # Map: Old Cluster ID -> New Sequential Layer Number (1..N)
             cluster_to_layer_map = {}
             for new_layer_num, info in enumerate(centers_info):
                 cluster_to_layer_map[info['id']] = new_layer_num + 1
-            
-            # C. Assign Layers to Colors
-            # labels[i] tells us which center picked_colors[i] belongs to
             for i, cluster_idx in enumerate(labels.flatten()):
                 new_layer_id = cluster_to_layer_map[cluster_idx]
                 self.layer_vars[i].set(new_layer_id)
@@ -435,7 +432,6 @@ class CamoStudioApp:
             for tab in self.notebook.tabs():
                 if tab != str(self.tab_main): self.notebook.forget(tab)
 
-    # --- BULK ACTIONS ---
     def apply_bulk_layer(self):
         target = self.bulk_target_layer.get()
         changed = False
@@ -444,7 +440,6 @@ class CamoStudioApp:
                 self.layer_vars[i].set(target)
                 changed = True
                 var.set(False) 
-        
         if changed:
             self.compact_layer_ids()
             self.update_pick_ui()
@@ -458,29 +453,22 @@ class CamoStudioApp:
         for var in self.layer_vars:
             var.set(id_map[var.get()])
 
-    # --- SELECTION LOGIC ---
     def handle_click_selection(self, index, event):
-        """Handles click and Shift+Click logic for the checkbox range"""
         if event and (event.state & 0x0001): # Shift Key Held
             if self.last_select_index != -1:
                 start = min(self.last_select_index, index)
                 end = max(self.last_select_index, index)
-                # Set range to True
                 for i in range(start, end + 1):
                     self.select_vars[i].set(True)
         else:
-            # Normal click logic is handled by Checkbutton naturally toggling.
-            # We just need to track this as the anchor for the next shift click.
             self.last_select_index = index
 
     def update_pick_ui(self):
         for widget in self.swatch_list_frame.winfo_children():
             widget.destroy()
-            
         if not self.picked_colors:
             tk.Label(self.swatch_list_frame, text="Auto-Mode", bg="#f0f0f0").pack(pady=10)
             return
-        
         h_frame = tk.Frame(self.swatch_list_frame, bg="#f0f0f0")
         h_frame.pack(fill="x", pady=2)
         tk.Label(h_frame, text="Sel", bg="#f0f0f0", font=("Arial", 7)).pack(side=tk.LEFT, padx=2)
@@ -488,31 +476,23 @@ class CamoStudioApp:
         btn_sort = tk.Button(h_frame, text="Resort", command=lambda: [self.reorder_palette_by_similarity(), self.update_pick_ui()], font=("Arial", 7), padx=2, pady=0)
         btn_sort.pack(side=tk.RIGHT, padx=2)
         tk.Label(h_frame, text="Layer #", bg="#f0f0f0", font=("Arial", 8, "bold")).pack(side=tk.RIGHT, padx=2)
-
         for i, bgr in enumerate(self.picked_colors):
             var = self.layer_vars[i]
             sel_var = self.select_vars[i]
             hex_c = bgr_to_hex(bgr)
             fg = "black" if is_bright(bgr) else "white"
-            
             f = tk.Frame(self.swatch_list_frame, bg=hex_c, height=30, highlightthickness=1, highlightbackground="#999")
             f.pack(fill="x", padx=5, pady=2)
             f.pack_propagate(False) 
-            
             chk = tk.Checkbutton(f, variable=sel_var, bg=hex_c, activebackground=hex_c)
             chk.pack(side=tk.LEFT, padx=2)
-            # Bind Shift+Click to the Checkbutton
             chk.bind("<Shift-Button-1>", lambda e, idx=i: self.handle_click_selection(idx, e))
-            # Also bind normal click to update anchor
             chk.bind("<Button-1>", lambda e, idx=i: self.handle_click_selection(idx, None))
-
             btn_del = tk.Label(f, text="X", bg="red", fg="white", font=("Arial", 8, "bold"), width=3)
             btn_del.pack(side=tk.LEFT, fill="y")
             btn_del.bind("<Button-1>", lambda e, idx=i: self.remove_color(idx))
-            
             lbl = tk.Label(f, text=hex_c, bg=hex_c, fg=fg, font=("Consolas", 9, "bold"))
             lbl.pack(side=tk.LEFT, expand=True)
-            
             spin = tk.Spinbox(f, from_=1, to=999, width=4, textvariable=var, font=("Arial", 10))
             spin.pack(side=tk.RIGHT, padx=5)
 
@@ -521,18 +501,32 @@ class CamoStudioApp:
         self.lbl_status.config(text="Processing...")
         self.progress['mode'] = 'indeterminate'
         self.progress.start(10)
-        threading.Thread(target=self.process_thread).start()
+        
+        # Snapshot config to avoid thread safety issues
+        snapshot_config = {
+            "max_width": self.config["max_width"].get(),
+            "max_colors": self.config["max_colors"].get(),
+            "denoise_strength": self.config["denoise_strength"].get(),
+            "min_blob_size": self.config["min_blob_size"].get(),
+            "orphaned_blobs": self.config["orphaned_blobs"].get()
+        }
+        
+        # Snapshot lists
+        snapshot_colors = list(self.picked_colors)
+        snapshot_layers = [v.get() for v in self.layer_vars]
+        
+        threading.Thread(target=self.process_thread, args=(self.cv_original_full, snapshot_config, snapshot_colors, snapshot_layers)).start()
 
-    def process_thread(self):
+    def process_thread(self, img_original, config, picked_colors, layer_ids):
         try:
-            img = self.cv_original_full.copy()
-            max_w = self.config["max_width"].get()
+            img = img_original.copy()
+            max_w = config["max_width"]
             h, w = img.shape[:2]
             if max_w and w > max_w:
                 scale = max_w / w
                 img = cv2.resize(img, (max_w, int(h * scale)), interpolation=cv2.INTER_AREA)
 
-            denoise_val = self.config["denoise_strength"].get()
+            denoise_val = config["denoise_strength"]
             if denoise_val > 0:
                 k = denoise_val if denoise_val % 2 == 1 else denoise_val + 1
                 img = cv2.GaussianBlur(img, (k, k), 0)
@@ -543,8 +537,9 @@ class CamoStudioApp:
             raw_masks = []
             raw_centers = []
             
-            if len(self.picked_colors) > 0:
-                centers = np.array(self.picked_colors, dtype=np.float32)
+            # 1. Determine Colors (Auto vs Manual)
+            if len(picked_colors) > 0:
+                centers = np.array(picked_colors, dtype=np.float32)
                 distances = np.zeros((data.shape[0], len(centers)), dtype=np.float32)
                 for i, center in enumerate(centers):
                     distances[:, i] = np.sum((data - center) ** 2, axis=1)
@@ -552,29 +547,32 @@ class CamoStudioApp:
                 raw_centers = np.uint8(centers)
                 num_raw_colors = len(centers)
             else:
-                max_k = self.config["max_colors"].get()
+                max_k = config["max_colors"]
                 criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
                 ret, label, center = cv2.kmeans(data, max_k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
                 raw_centers = np.uint8(center)
                 labels_reshaped = label.flatten().reshape((h, w))
                 num_raw_colors = len(raw_centers)
 
+            # 2. Generate Raw Masks
             for i in range(num_raw_colors):
                 mask = cv2.inRange(labels_reshaped, i, i)
                 raw_masks.append(mask)
 
             final_masks = []
             final_centers = []
+            total_coverage_mask = np.zeros((h, w), dtype=np.uint8) # Accumulator for optimization
             
-            min_blob = self.config["min_blob_size"].get()
+            min_blob = config["min_blob_size"]
             kernel = None
             if denoise_val > 0:
                 kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (denoise_val, denoise_val))
 
-            if len(self.picked_colors) > 0:
+            # 3. Merge & Filter Layers
+            if len(picked_colors) > 0:
+                # Group by Layer ID
                 layer_map = {} 
-                for idx, var in enumerate(self.layer_vars):
-                    lid = var.get()
+                for idx, lid in enumerate(layer_ids):
                     if lid not in layer_map: layer_map[lid] = []
                     layer_map[lid].append(idx)
                 
@@ -595,64 +593,55 @@ class CamoStudioApp:
                         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
                         combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
                     
-                    if min_blob > 0:
-                        contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        filtered = np.zeros_like(combined_mask)
-                        valid = [c for c in contours if cv2.contourArea(c) >= min_blob]
-                        if valid: cv2.drawContours(filtered, valid, -1, 255, -1)
-                        final_masks.append(filtered)
-                    else:
-                        final_masks.append(combined_mask)
-                        
+                    # Optimize: Use raster filtering instead of vector filtering
+                    filtered = filter_small_blobs(combined_mask, min_blob)
+                    final_masks.append(filtered)
                     final_centers.append(avg_color)
+                    
+                    # Accumulate coverage
+                    total_coverage_mask = cv2.bitwise_or(total_coverage_mask, filtered)
 
             else:
+                # Auto Mode
                 for i, mask in enumerate(raw_masks):
                     if kernel is not None:
                         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
                         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
                     
-                    if min_blob > 0:
-                        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                        filtered = np.zeros_like(mask)
-                        valid = [c for c in contours if cv2.contourArea(c) >= min_blob]
-                        if valid: cv2.drawContours(filtered, valid, -1, 255, -1)
-                        final_masks.append(filtered)
-                    else:
-                        final_masks.append(mask)
+                    filtered = filter_small_blobs(mask, min_blob)
+                    final_masks.append(filtered)
+                    
+                    # Accumulate coverage
+                    total_coverage_mask = cv2.bitwise_or(total_coverage_mask, filtered)
                 final_centers = raw_centers
 
-            # --- ORPHANED BLOBS FEATURE ---
-            if self.config["orphaned_blobs"].get():
-                # 1. Calculate total coverage
-                full_mask = np.zeros((h, w), dtype=np.uint8)
-                for m in final_masks:
-                    full_mask = cv2.bitwise_or(full_mask, m)
+            # 4. Orphaned Blobs (Optimized)
+            if config["orphaned_blobs"]:
+                # We already have total_coverage_mask, no need to loop final_masks again!
+                orphans = cv2.bitwise_not(total_coverage_mask)
                 
-                # 2. Find empty space (where full_mask is 0)
-                orphans = cv2.bitwise_not(full_mask)
-                
-                # 3. Filter orphans
                 if kernel is not None:
                     orphans = cv2.morphologyEx(orphans, cv2.MORPH_OPEN, kernel)
                     orphans = cv2.morphologyEx(orphans, cv2.MORPH_CLOSE, kernel)
 
-                if min_blob > 0:
-                    contours, _ = cv2.findContours(orphans, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    filtered_orphans = np.zeros_like(orphans)
-                    valid = [c for c in contours if cv2.contourArea(c) >= min_blob]
-                    if valid:
-                        cv2.drawContours(filtered_orphans, valid, -1, 255, -1)
-                    orphans_final = filtered_orphans
-                else:
-                    orphans_final = orphans
+                # Filter Orphans
+                orphans_final = filter_small_blobs(orphans, min_blob)
 
-                # 4. Add if significant content exists
                 if cv2.countNonZero(orphans_final) > 0:
-                    while True:
-                        rand_c = np.random.randint(0, 256, 3).astype(np.uint8)
-                        dists = [np.sum((c - rand_c)**2) for c in final_centers]
-                        if not dists or min(dists) > 2000: # Ensure reasonable contrast
+                    # Safety break for color picking to avoid infinite loop
+                    attempts = 0
+                    rand_c = np.array([0, 255, 0], dtype=np.uint8) # Default green if search fails
+                    
+                    while attempts < 50:
+                        attempts += 1
+                        candidate = np.random.randint(0, 256, 3).astype(np.uint8)
+                        dists = [np.sum((c - candidate)**2) for c in final_centers]
+                        
+                        # Adaptive threshold: if crowded (many layers), accept lower contrast
+                        threshold = 2000 if len(final_centers) < 10 else 500
+                        
+                        if not dists or min(dists) > threshold: 
+                            rand_c = candidate
                             break
                     
                     final_masks.append(orphans_final)
@@ -665,7 +654,7 @@ class CamoStudioApp:
                 "width": w,
                 "height": h
             }
-            self._generate_previews(final_centers, final_masks, w, h)
+            self.root.after(0, lambda: self._generate_previews(final_centers, final_masks, w, h))
             self.root.after(0, self.update_ui_after_process)
 
         except Exception as e:
