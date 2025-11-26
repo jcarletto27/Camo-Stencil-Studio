@@ -38,12 +38,13 @@ def filter_small_blobs(mask, min_size):
     lut[valid_labels] = 255
     return lut[labels]
 
-# --- NEW: ZOOM/PAN CANVAS ---
+# --- NEW: ZOOM/PAN CANVAS WITH DRAW HOOK ---
 class ZoomPanCanvas(tk.Canvas):
     def __init__(self, parent, pil_image, **kwargs):
         super().__init__(parent, **kwargs)
         self.pil_image = pil_image
         self.tk_image = None
+        self.post_draw_hook = None # Function to call after image redraw
         
         # Transform state
         self.zoom = 1.0
@@ -100,27 +101,22 @@ class ZoomPanCanvas(tk.Canvas):
         self.redraw()
 
     def redraw(self):
-        if not self.pil_image: 
-            self.delete("all")
-            return
-        
         self.delete("all")
-        
-        # Viewport clipping calculation could go here for optimization
-        # For simplicity, we resize the whole image (PIL is fast enough for reasonable sizes)
+        if not self.pil_image: return
         
         new_w = int(self.pil_image.width * self.zoom)
         new_h = int(self.pil_image.height * self.zoom)
         
         if new_w < 1 or new_h < 1: return
         
-        # Use Nearest for speed during interactive manip, Lanczos for static could be an optimization
-        # keeping it simple with Bilinear for balance
         try:
             resized = self.pil_image.resize((new_w, new_h), Image.Resampling.BOX)
             self.tk_image = ImageTk.PhotoImage(resized)
             self.create_image(self.pan_x, self.pan_y, anchor="nw", image=self.tk_image)
         except: pass
+        
+        if self.post_draw_hook:
+            self.post_draw_hook()
 
     def get_image_coordinates(self, screen_x, screen_y):
         if not self.pil_image: return None
@@ -131,6 +127,11 @@ class ZoomPanCanvas(tk.Canvas):
         if 0 <= img_x < self.pil_image.width and 0 <= img_y < self.pil_image.height:
             return (img_x, img_y)
         return None
+        
+    def image_to_screen_coords(self, img_x, img_y):
+        scr_x = (img_x * self.zoom) + self.pan_x
+        scr_y = (img_y * self.zoom) + self.pan_y
+        return scr_x, scr_y
 
 # --- HELPER: DXF WRITER ---
 def write_simple_dxf(filename, contours, height_mm):
@@ -186,7 +187,7 @@ def create_guide_image(centers, filename):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v31 - UI/UX & Mfg Update")
+        self.root.title("Camo Studio v32 - Image Manipulation")
         self.root.geometry("1200x850")
         
         self.settings_file = "user_settings.json"
@@ -208,13 +209,22 @@ class CamoStudioApp:
         self.exp_border = tk.DoubleVar(value=5.0)
         self.exp_bridge = tk.DoubleVar(value=2.0)
         self.exp_invert = tk.BooleanVar(value=True)
-        self.exp_dxf = tk.BooleanVar(value=True) # NEW: Export DXF option
+        self.exp_dxf = tk.BooleanVar(value=True)
         
         self.load_app_settings()
         
         self.original_image_path = None
-        self.cv_original_full = None 
-        self.current_base_name = "camo"
+        
+        # --- IMAGE PIPELINE VARS ---
+        self.cv_geo_base = None # Image after Rotation/Crop (Geometry Base)
+        self.cv_original_full = None # Image after B/C (View) -> Used by app
+        self.brightness_val = tk.DoubleVar(value=1.0) # 0.0 to 3.0 (1.0 neutral)
+        self.contrast_val = tk.DoubleVar(value=0)     # -100 to 100 (0 neutral)
+        
+        # --- CROP VARS ---
+        self.is_cropping = False
+        self.crop_start = None
+        self.crop_current = None
         
         self.picked_colors = [] 
         self.layer_vars = []
@@ -225,7 +235,7 @@ class CamoStudioApp:
         # --- UNDO STACK ---
         self.undo_stack = []
         self.redo_stack = []
-        self.is_undoing = False # Lock to prevent undo actions from creating new history
+        self.is_undoing = False 
         
         self.processed_data = None 
         self.view_vector = tk.BooleanVar(value=False)
@@ -288,12 +298,11 @@ class CamoStudioApp:
         self.root.bind("<Control-s>", lambda e: self.save_project_json())
         self.root.bind("<Control-Shift-O>", lambda e: self.load_project_json())
         self.root.bind("<Control-p>", self.trigger_process)
-        self.root.bind("<Control-y>", self.yolo_scan) # Acts as Auto-Scan in UI
+        self.root.bind("<Control-y>", self.yolo_scan) 
         self.root.bind("<Control-e>", self.export_bundle_2d)
         self.root.bind("<Control-comma>", self.open_config_window)
-        # Undo/Redo
         self.root.bind("<Control-z>", lambda e: self.undo())
-        self.root.bind("<Control-Z>", lambda e: self.redo()) # Shift+Z
+        self.root.bind("<Control-Z>", lambda e: self.redo()) 
         self.root.bind("<Control-Shift-z>", lambda e: self.redo())
 
     def _create_ui(self):
@@ -338,31 +347,21 @@ class CamoStudioApp:
         self.input_container = tk.Frame(self.tab_main)
         self.input_container.pack(fill="both", expand=True)
 
-        self.swatch_sidebar = tk.Frame(self.input_container, width=280, bg="#f0f0f0", padx=5, pady=5)
-        self.swatch_sidebar.pack(side=tk.LEFT, fill="y")
-        self.swatch_sidebar.pack_propagate(False) 
+        # --- SIDEBAR TABS ---
+        self.sidebar_notebook = ttk.Notebook(self.input_container, width=280)
+        self.sidebar_notebook.pack(side=tk.LEFT, fill="y", padx=5, pady=5)
         
-        self.sidebar_tools = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
-        self.sidebar_tools.pack(side=tk.TOP, fill="x", pady=(0, 5))
+        # TAB 1: PALETTE
+        self.palette_tab = tk.Frame(self.sidebar_notebook)
+        self.sidebar_notebook.add(self.palette_tab, text="Palette")
+        
+        self.sidebar_tools = tk.Frame(self.palette_tab)
+        self.sidebar_tools.pack(side=tk.TOP, fill="x", pady=(5, 5))
         tk.Button(self.sidebar_tools, text="YOLO Scan (Auto-Detect)", command=self.yolo_scan, 
                   bg="#FF9800", fg="white", font=("Arial", 9, "bold")).pack(fill="x", padx=5)
 
-        self.bulk_frame = tk.Frame(self.swatch_sidebar, bg="#e0e0e0", padx=5, pady=5)
-        self.bulk_frame.pack(side=tk.BOTTOM, fill="x")
-        
-        bf_header = tk.Frame(self.bulk_frame, bg="#e0e0e0")
-        bf_header.pack(fill="x", pady=(0,2))
-        tk.Label(bf_header, text="Bulk Assign:", bg="#e0e0e0", font=("Arial", 8, "bold")).pack(side=tk.LEFT)
-        tk.Button(bf_header, text="Clear List", command=self.reset_picks, bg="#ffdddd", font=("Arial", 7)).pack(side=tk.RIGHT)
-
-        bf_inner = tk.Frame(self.bulk_frame, bg="#e0e0e0")
-        bf_inner.pack(fill="x", pady=2)
-        tk.Label(bf_inner, text="Sel. to Layer:", bg="#e0e0e0", font=("Arial", 8)).pack(side=tk.LEFT)
-        tk.Spinbox(bf_inner, from_=1, to=999, width=4, textvariable=self.bulk_target_layer).pack(side=tk.LEFT, padx=5)
-        tk.Button(bf_inner, text="Apply", command=self.apply_bulk_layer, bg="#ccc", font=("Arial", 8)).pack(side=tk.LEFT)
-
-        self.swatch_container = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
-        self.swatch_container.pack(side=tk.LEFT, fill="both", expand=True)
+        self.swatch_container = tk.Frame(self.palette_tab)
+        self.swatch_container.pack(side=tk.TOP, fill="both", expand=True)
         
         self.swatch_canvas = tk.Canvas(self.swatch_container, bg="#f0f0f0", highlightthickness=0)
         self.swatch_scrollbar = ttk.Scrollbar(self.swatch_container, orient="vertical", command=self.swatch_canvas.yview)
@@ -372,13 +371,53 @@ class CamoStudioApp:
         self.swatch_window = self.swatch_canvas.create_window((0, 0), window=self.swatch_list_frame, anchor="nw")
         self.swatch_canvas.bind("<Configure>", lambda e: self.swatch_canvas.itemconfig(self.swatch_window, width=e.width))
         self.swatch_canvas.configure(yscrollcommand=self.swatch_scrollbar.set)
-        
         self.swatch_scrollbar.pack(side=tk.RIGHT, fill="y")
         self.swatch_canvas.pack(side=tk.LEFT, fill="both", expand=True)
         
         def _on_mousewheel(event):
             self.swatch_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
         self.swatch_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        self.bulk_frame = tk.Frame(self.palette_tab, bg="#e0e0e0", padx=5, pady=5)
+        self.bulk_frame.pack(side=tk.BOTTOM, fill="x")
+        bf_header = tk.Frame(self.bulk_frame, bg="#e0e0e0")
+        bf_header.pack(fill="x", pady=(0,2))
+        tk.Label(bf_header, text="Bulk Assign:", bg="#e0e0e0", font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        tk.Button(bf_header, text="Clear List", command=self.reset_picks, bg="#ffdddd", font=("Arial", 7)).pack(side=tk.RIGHT)
+        bf_inner = tk.Frame(self.bulk_frame, bg="#e0e0e0")
+        bf_inner.pack(fill="x", pady=2)
+        tk.Label(bf_inner, text="Sel. to Layer:", bg="#e0e0e0", font=("Arial", 8)).pack(side=tk.LEFT)
+        tk.Spinbox(bf_inner, from_=1, to=999, width=4, textvariable=self.bulk_target_layer).pack(side=tk.LEFT, padx=5)
+        tk.Button(bf_inner, text="Apply", command=self.apply_bulk_layer, bg="#ccc", font=("Arial", 8)).pack(side=tk.LEFT)
+
+        # TAB 2: IMAGE TOOLS
+        self.img_tools_tab = tk.Frame(self.sidebar_notebook, padx=5, pady=5)
+        self.sidebar_notebook.add(self.img_tools_tab, text="Image Tools")
+        
+        # Adjustments
+        tk.Label(self.img_tools_tab, text="Adjustments", font=("Arial", 10, "bold")).pack(pady=(10, 5), anchor="w")
+        tk.Label(self.img_tools_tab, text="Brightness").pack(anchor="w")
+        tk.Scale(self.img_tools_tab, from_=0.5, to=2.0, resolution=0.1, orient=tk.HORIZONTAL, variable=self.brightness_val, command=self.apply_image_transform).pack(fill="x")
+        
+        tk.Label(self.img_tools_tab, text="Contrast").pack(anchor="w")
+        tk.Scale(self.img_tools_tab, from_=-50, to=50, orient=tk.HORIZONTAL, variable=self.contrast_val, command=self.apply_image_transform).pack(fill="x")
+        
+        tk.Button(self.img_tools_tab, text="Reset Sliders", command=self.reset_bc_sliders).pack(fill="x", pady=5)
+        
+        ttk.Separator(self.img_tools_tab, orient="horizontal").pack(fill="x", pady=15)
+        
+        # Geometry
+        tk.Label(self.img_tools_tab, text="Geometry", font=("Arial", 10, "bold")).pack(pady=(0, 5), anchor="w")
+        
+        rot_frame = tk.Frame(self.img_tools_tab)
+        rot_frame.pack(fill="x", pady=5)
+        tk.Button(rot_frame, text="Rotate L", command=lambda: self.rotate_image(cv2.ROTATE_90_COUNTERCLOCKWISE)).pack(side=tk.LEFT, expand=True, fill="x", padx=2)
+        tk.Button(rot_frame, text="Rotate R", command=lambda: self.rotate_image(cv2.ROTATE_90_CLOCKWISE)).pack(side=tk.LEFT, expand=True, fill="x", padx=2)
+        
+        self.btn_crop = tk.Button(self.img_tools_tab, text="Crop Tool", command=self.toggle_crop_mode, bg="#ddd")
+        self.btn_crop.pack(fill="x", pady=10)
+        
+        tk.Button(self.img_tools_tab, text="Reset Image Geometry", command=self.reset_geometry, fg="red").pack(fill="x", pady=20)
 
         self.canvas_frame = tk.Frame(self.input_container, bg="#333")
         self.canvas_frame.pack(side=tk.LEFT, fill="both", expand=True)
@@ -394,6 +433,116 @@ class CamoStudioApp:
         self.progress.pack(side=tk.BOTTOM, fill=tk.X)
         self.lbl_status = tk.Label(self.root, text="Ready.", anchor="w")
         self.lbl_status.pack(side=tk.BOTTOM, fill=tk.X)
+
+    # --- IMAGE PIPELINE ---
+    def reset_bc_sliders(self):
+        self.brightness_val.set(1.0)
+        self.contrast_val.set(0)
+        self.apply_image_transform()
+
+    def reset_geometry(self):
+        if self.original_image_path and os.path.exists(self.original_image_path):
+            # Reload fresh
+            self.cv_original_full = cv2.imread(self.original_image_path)
+            self.cv_geo_base = self.cv_original_full.copy()
+            self.reset_bc_sliders() # Triggers display update
+            self.lbl_status.config(text="Geometry reset.")
+
+    def apply_image_transform(self, event=None):
+        """ Applies B/C to the Geometry Base and updates the View. """
+        if self.cv_geo_base is None: return
+        
+        # Contrast/Brightness formula: new = alpha*old + beta
+        # alpha = brightness (1.0 is neutral), beta = contrast shift? 
+        # Actually OpenCV uses alpha for contrast (gain), beta for brightness (bias)
+        # But let's map user sliders: Brightness (Mult), Contrast (Add) roughly
+        
+        alpha = self.brightness_val.get() 
+        beta = self.contrast_val.get()
+        
+        # Apply
+        res = cv2.convertScaleAbs(self.cv_geo_base, alpha=alpha, beta=beta)
+        
+        self.cv_original_full = res
+        self.update_canvas_image(res)
+
+    def update_canvas_image(self, cv_img):
+        if self.main_canvas:
+            rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(rgb)
+            self.main_canvas.pil_image = pil
+            self.main_canvas.redraw()
+
+    def rotate_image(self, code):
+        if self.cv_geo_base is None: return
+        self.cv_geo_base = cv2.rotate(self.cv_geo_base, code)
+        self.apply_image_transform() # Re-apply B/C to new orientation
+
+    # --- CROP LOGIC ---
+    def toggle_crop_mode(self):
+        if self.cv_geo_base is None: return
+        if not self.is_cropping:
+            self.is_cropping = True
+            self.btn_crop.config(text="Cancel Crop", bg="#ffdddd")
+            self.main_canvas.bind("<ButtonPress-1>", self.crop_mousedown)
+            self.main_canvas.bind("<B1-Motion>", self.crop_mousemove)
+            self.main_canvas.bind("<ButtonRelease-1>", self.crop_mouseup)
+            self.main_canvas.post_draw_hook = self.draw_crop_rect
+            self.lbl_status.config(text="Crop Mode: Drag to select area. Click inside to confirm.")
+        else:
+            self.end_crop_mode()
+
+    def end_crop_mode(self):
+        self.is_cropping = False
+        self.crop_start = None
+        self.crop_current = None
+        self.btn_crop.config(text="Crop Tool", bg="#ddd")
+        self.main_canvas.unbind("<ButtonPress-1>")
+        self.main_canvas.unbind("<B1-Motion>")
+        self.main_canvas.unbind("<ButtonRelease-1>")
+        # Rebind standard click
+        self.main_canvas.bind("<Button-1>", self.on_canvas_click)
+        self.main_canvas.post_draw_hook = None
+        self.main_canvas.redraw()
+        self.lbl_status.config(text="Crop cancelled.")
+
+    def crop_mousedown(self, event):
+        coords = self.main_canvas.get_image_coordinates(event.x, event.y)
+        if coords:
+            self.crop_start = coords
+            self.crop_current = coords
+
+    def crop_mousemove(self, event):
+        if not self.crop_start: return
+        coords = self.main_canvas.get_image_coordinates(event.x, event.y)
+        if coords:
+            self.crop_current = coords
+            self.main_canvas.redraw() # Triggers hook
+
+    def crop_mouseup(self, event):
+        # If drag was tiny, treat as click?
+        if not self.crop_start or not self.crop_current: return
+        x1, y1 = self.crop_start
+        x2, y2 = self.crop_current
+        if abs(x2-x1) < 5 or abs(y2-y1) < 5: return
+        
+        if messagebox.askyesno("Confirm Crop", "Crop to selected area?"):
+            # Perform Crop
+            x_min, x_max = sorted([x1, x2])
+            y_min, y_max = sorted([y1, y2])
+            
+            # Crop from geo_base
+            self.cv_geo_base = self.cv_geo_base[y_min:y_max, x_min:x_max]
+            self.apply_image_transform()
+            self.end_crop_mode()
+            self.lbl_status.config(text="Image Cropped.")
+
+    def draw_crop_rect(self):
+        if not self.crop_start or not self.crop_current: return
+        # Convert image coords back to screen
+        x1, y1 = self.main_canvas.image_to_screen_coords(*self.crop_start)
+        x2, y2 = self.main_canvas.image_to_screen_coords(*self.crop_current)
+        self.main_canvas.create_rectangle(x1, y1, x2, y2, outline="red", width=2, dash=(4, 2))
 
     # --- UNDO / REDO LOGIC ---
     def push_undo_state(self):
@@ -621,7 +770,8 @@ class CamoStudioApp:
         if self.picked_colors and not messagebox.askyesno("New Project", "Discard current changes?"):
             return
         self.original_image_path = None
-        self.cv_original_full = None
+        self.cv_original_full = None # The View
+        self.cv_geo_base = None      # The Source
         self.current_base_name = "camo"
         self.picked_colors = []
         self.layer_vars = []
@@ -630,6 +780,10 @@ class CamoStudioApp:
         self.redo_stack = []
         self.last_select_index = -1
         self.processed_data = None
+        
+        self.brightness_val.set(1.0)
+        self.contrast_val.set(0)
+        
         self.update_pick_ui()
         if self.main_canvas: 
             self.main_canvas.destroy()
@@ -653,16 +807,24 @@ class CamoStudioApp:
 
         self.original_image_path = path
         self.current_base_name = os.path.splitext(os.path.basename(path))[0]
+        
+        # Load Image
         self.cv_original_full = cv2.imread(path)
+        self.cv_geo_base = self.cv_original_full.copy() # Store pristine copy for B/C resets
+        
         rgb_img = cv2.cvtColor(self.cv_original_full, cv2.COLOR_BGR2RGB)
         pil_img = Image.fromarray(rgb_img)
+        
         self.btn_main_load.place_forget()
         if self.main_canvas: self.main_canvas.destroy()
         self.main_canvas = ZoomPanCanvas(self.canvas_frame, pil_image=pil_img, bg="#333", highlightthickness=0)
         self.main_canvas.pack(fill="both", expand=True)
         self.main_canvas.bind("<Button-1>", self.on_canvas_click)
+        
         if from_path is None:
             self.reset_picks()
+            self.reset_bc_sliders()
+            
         self.lbl_status.config(text=f"Loaded: {os.path.basename(path)}")
 
     def save_project_json(self):
