@@ -36,6 +36,7 @@ It bridges the gap between 2D image processing and physical fabrication, allowin
 ## Installation & Setup
 
 ### Requirements
+The software requires `Python 3.13.0` or higher,  `venv`, and `pip`
 The software relies on the following Python libraries:
 ```bash
 pip install opencv-python numpy svgwrite Pillow trimesh shapely
