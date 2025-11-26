@@ -397,10 +397,15 @@ class CamoStudioApp:
         # Adjustments
         tk.Label(self.img_tools_tab, text="Adjustments", font=("Arial", 10, "bold")).pack(pady=(10, 5), anchor="w")
         tk.Label(self.img_tools_tab, text="Brightness").pack(anchor="w")
-        tk.Scale(self.img_tools_tab, from_=0.5, to=2.0, resolution=0.1, orient=tk.HORIZONTAL, variable=self.brightness_val, command=self.apply_image_transform).pack(fill="x")
+        # Bind Press-1 to save state BEFORE drag starts
+        s_bright = tk.Scale(self.img_tools_tab, from_=0.5, to=2.0, resolution=0.1, orient=tk.HORIZONTAL, variable=self.brightness_val, command=self.apply_image_transform)
+        s_bright.bind("<ButtonPress-1>", lambda e: self.push_undo_state())
+        s_bright.pack(fill="x")
         
         tk.Label(self.img_tools_tab, text="Contrast").pack(anchor="w")
-        tk.Scale(self.img_tools_tab, from_=-50, to=50, orient=tk.HORIZONTAL, variable=self.contrast_val, command=self.apply_image_transform).pack(fill="x")
+        s_cont = tk.Scale(self.img_tools_tab, from_=-50, to=50, orient=tk.HORIZONTAL, variable=self.contrast_val, command=self.apply_image_transform)
+        s_cont.bind("<ButtonPress-1>", lambda e: self.push_undo_state())
+        s_cont.pack(fill="x")
         
         tk.Button(self.img_tools_tab, text="Reset Sliders", command=self.reset_bc_sliders).pack(fill="x", pady=5)
         
@@ -436,12 +441,14 @@ class CamoStudioApp:
 
     # --- IMAGE PIPELINE ---
     def reset_bc_sliders(self):
+        self.push_undo_state() # Save before reset
         self.brightness_val.set(1.0)
         self.contrast_val.set(0)
         self.apply_image_transform()
 
     def reset_geometry(self):
         if self.original_image_path and os.path.exists(self.original_image_path):
+            self.push_undo_state() # Save before reset
             # Reload fresh
             self.cv_original_full = cv2.imread(self.original_image_path)
             self.cv_geo_base = self.cv_original_full.copy()
@@ -475,6 +482,7 @@ class CamoStudioApp:
 
     def rotate_image(self, code):
         if self.cv_geo_base is None: return
+        self.push_undo_state() # Save before rotate
         self.cv_geo_base = cv2.rotate(self.cv_geo_base, code)
         self.apply_image_transform() # Re-apply B/C to new orientation
 
@@ -527,6 +535,8 @@ class CamoStudioApp:
         if abs(x2-x1) < 5 or abs(y2-y1) < 5: return
         
         if messagebox.askyesno("Confirm Crop", "Crop to selected area?"):
+            self.push_undo_state() # Save before crop applies
+            
             # Perform Crop
             x_min, x_max = sorted([x1, x2])
             y_min, y_max = sorted([y1, y2])
@@ -550,19 +560,32 @@ class CamoStudioApp:
         
         state = {
             "colors": list(self.picked_colors),
-            "layers": [v.get() for v in self.layer_vars]
+            "layers": [v.get() for v in self.layer_vars],
+            # Image Pipeline State
+            "geo_base": self.cv_geo_base.copy() if self.cv_geo_base is not None else None,
+            "brightness": self.brightness_val.get(),
+            "contrast": self.contrast_val.get()
         }
         # Avoid duplicates
         if self.undo_stack:
             last = self.undo_stack[-1]
-            if last["colors"] == state["colors"] and last["layers"] == state["layers"]:
-                return
+            # Simple diff check
+            if (last["colors"] == state["colors"] and 
+                last["layers"] == state["layers"] and 
+                last["brightness"] == state["brightness"] and
+                last["contrast"] == state["contrast"]):
+                
+                # Check image equality only if diff
+                if last["geo_base"] is None and state["geo_base"] is None: return
+                if (last["geo_base"] is not None and state["geo_base"] is not None and 
+                    np.array_equal(last["geo_base"], state["geo_base"])):
+                    return
         
         self.undo_stack.append(state)
         self.redo_stack.clear() # Clear redo on new action
         
-        # Limit stack size
-        if len(self.undo_stack) > 20:
+        # Limit stack size (images are heavy)
+        if len(self.undo_stack) > 15:
             self.undo_stack.pop(0)
 
     def undo(self, event=None):
@@ -571,7 +594,10 @@ class CamoStudioApp:
         # Save current as redoable
         current_state = {
             "colors": list(self.picked_colors),
-            "layers": [v.get() for v in self.layer_vars]
+            "layers": [v.get() for v in self.layer_vars],
+            "geo_base": self.cv_geo_base.copy() if self.cv_geo_base is not None else None,
+            "brightness": self.brightness_val.get(),
+            "contrast": self.contrast_val.get()
         }
         self.redo_stack.append(current_state)
         
@@ -585,7 +611,10 @@ class CamoStudioApp:
         # Save current to undo
         current_state = {
             "colors": list(self.picked_colors),
-            "layers": [v.get() for v in self.layer_vars]
+            "layers": [v.get() for v in self.layer_vars],
+            "geo_base": self.cv_geo_base.copy() if self.cv_geo_base is not None else None,
+            "brightness": self.brightness_val.get(),
+            "contrast": self.contrast_val.get()
         }
         self.undo_stack.append(current_state)
         
@@ -605,6 +634,14 @@ class CamoStudioApp:
             self.select_vars.append(tk.BooleanVar(value=False))
             
         self.update_pick_ui()
+        
+        # Restore Image Pipeline
+        if state["geo_base"] is not None:
+            self.cv_geo_base = state["geo_base"].copy()
+            self.brightness_val.set(state["brightness"])
+            self.contrast_val.set(state["contrast"])
+            self.apply_image_transform()
+            
         self.is_undoing = False
 
     # --- UPDATED COLOR ACTIONS WITH UNDO PUSH ---
