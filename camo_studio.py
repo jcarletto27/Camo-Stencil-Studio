@@ -134,23 +134,32 @@ class ZoomPanCanvas(tk.Canvas):
         return scr_x, scr_y
 
 # --- HELPER: DXF WRITER ---
-def write_simple_dxf(filename, contours, height_mm):
-    """ Writes a minimal DXF R12 file with LWPOLYLINE entities. """
+def write_simple_dxf(filename, shapely_geoms, height_mm, scale_factor=1.0):
+    """ Writes a minimal DXF R12 file from Shapely geometries. """
     with open(filename, 'w') as f:
         # Header
         f.write("0\nSECTION\n2\nENTITIES\n")
         
-        for cnt in contours:
-            # Ensure closed loop
-            pts = cnt.squeeze().tolist()
-            if not pts or len(pts) < 2: continue
-            
+        def write_poly(pts):
             f.write("0\nLWPOLYLINE\n")
             f.write("8\n0\n") # Layer 0
             f.write(f"90\n{len(pts)}\n") # Num vertices
             f.write("70\n1\n") # Closed flag
             for p in pts:
-                f.write(f"10\n{p[0]:.4f}\n20\n{height_mm - p[1]:.4f}\n") # Flip Y for CAD
+                # Flip Y for CAD, assumes units match (pixels or mm)
+                f.write(f"10\n{p[0]:.4f}\n20\n{height_mm - p[1]:.4f}\n") 
+        
+        for geom in shapely_geoms:
+            if geom.is_empty: continue
+            if isinstance(geom, Polygon):
+                if geom.exterior: write_poly(geom.exterior.coords)
+                for interior in geom.interiors:
+                    write_poly(interior.coords)
+            elif isinstance(geom, MultiPolygon):
+                for poly in geom.geoms:
+                    if poly.exterior: write_poly(poly.exterior.coords)
+                    for interior in poly.interiors:
+                        write_poly(interior.coords)
             
         f.write("0\nENDSEC\n0\nEOF\n")
 
@@ -187,7 +196,7 @@ def create_guide_image(centers, filename):
 class CamoStudioApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Camo Studio v32 - Image Manipulation")
+        self.root.title("Camo Studio v33 - Kerf & Reg Marks")
         self.root.geometry("1200x850")
         
         self.settings_file = "user_settings.json"
@@ -203,6 +212,7 @@ class CamoStudioApp:
             "orphaned_blobs": tk.BooleanVar(value=False) 
         }
         
+        # 3D Export Vars
         self.exp_units = tk.StringVar(value="mm")
         self.exp_width = tk.DoubleVar(value=100.0)
         self.exp_height = tk.DoubleVar(value=2.0) 
@@ -210,6 +220,10 @@ class CamoStudioApp:
         self.exp_bridge = tk.DoubleVar(value=2.0)
         self.exp_invert = tk.BooleanVar(value=True)
         self.exp_dxf = tk.BooleanVar(value=True)
+        
+        # 2D Export Vars
+        self.exp_2d_kerf = tk.DoubleVar(value=0.0)
+        self.exp_2d_reg_marks = tk.BooleanVar(value=True)
         
         self.load_app_settings()
         
@@ -263,6 +277,9 @@ class CamoStudioApp:
             self.exp_border.set(exp.get("border", 5.0))
             self.exp_bridge.set(exp.get("bridge", 2.0))
             self.exp_invert.set(exp.get("invert", True))
+            self.exp_dxf.set(exp.get("dxf", True))
+            self.exp_2d_kerf.set(exp.get("2d_kerf", 0.0))
+            self.exp_2d_reg_marks.set(exp.get("2d_reg_marks", True))
             last_dir = data.get("last_directory", "")
             if last_dir and os.path.exists(last_dir):
                 self.last_opened_dir = last_dir
@@ -278,7 +295,10 @@ class CamoStudioApp:
                 "height": self.exp_height.get(),
                 "border": self.exp_border.get(),
                 "bridge": self.exp_bridge.get(),
-                "invert": self.exp_invert.get()
+                "invert": self.exp_invert.get(),
+                "dxf": self.exp_dxf.get(),
+                "2d_kerf": self.exp_2d_kerf.get(),
+                "2d_reg_marks": self.exp_2d_reg_marks.get()
             },
             "last_directory": self.last_opened_dir
         }
@@ -299,7 +319,7 @@ class CamoStudioApp:
         self.root.bind("<Control-Shift-O>", lambda e: self.load_project_json())
         self.root.bind("<Control-p>", self.trigger_process)
         self.root.bind("<Control-y>", self.yolo_scan) 
-        self.root.bind("<Control-e>", self.export_bundle_2d)
+        self.root.bind("<Control-e>", self.open_2d_export_window) # Changed binding
         self.root.bind("<Control-comma>", self.open_config_window)
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-Z>", lambda e: self.redo()) 
@@ -314,7 +334,7 @@ class CamoStudioApp:
         file_menu.add_command(label="Open Project... (Ctrl+Shift+O)", command=self.load_project_json)
         file_menu.add_command(label="Save Project (Ctrl+S)", command=self.save_project_json)
         file_menu.add_separator()
-        file_menu.add_command(label="Export SVG Bundle (Ctrl+E)", command=self.export_bundle_2d)
+        file_menu.add_command(label="Export SVG Bundle (Ctrl+E)", command=self.open_2d_export_window)
         file_menu.add_command(label="Export STL Models (Ctrl+Shift+E)", command=self.open_3d_export_window)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.on_close)
@@ -458,11 +478,6 @@ class CamoStudioApp:
     def apply_image_transform(self, event=None):
         """ Applies B/C to the Geometry Base and updates the View. """
         if self.cv_geo_base is None: return
-        
-        # Contrast/Brightness formula: new = alpha*old + beta
-        # alpha = brightness (1.0 is neutral), beta = contrast shift? 
-        # Actually OpenCV uses alpha for contrast (gain), beta for brightness (bias)
-        # But let's map user sliders: Brightness (Mult), Contrast (Add) roughly
         
         alpha = self.brightness_val.get() 
         beta = self.contrast_val.get()
@@ -762,6 +777,42 @@ class CamoStudioApp:
         tk.Label(form, text="Filename Template:").grid(row=row, column=0, sticky="w")
         tk.Entry(form, textvariable=self.config["filename_template"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
         tk.Button(top, text="Close", command=top.destroy).pack(pady=10)
+
+    # --- NEW: 2D EXPORT DIALOG ---
+    def open_2d_export_window(self, event=None):
+        if not self.processed_data:
+            messagebox.showwarning("No Data", "Process an image first.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Export 2D Vectors")
+        win.geometry("400x350")
+        form = tk.Frame(win, padx=20, pady=20)
+        form.pack(fill="both", expand=True)
+        
+        tk.Label(form, text="2D Export Settings", font=("Arial", 10, "bold")).pack(pady=10)
+        
+        # Kerf
+        k_frame = tk.Frame(form); k_frame.pack(fill="x", pady=5)
+        tk.Label(k_frame, text="Kerf Offset (px):").pack(side=tk.LEFT)
+        tk.Entry(k_frame, textvariable=self.exp_2d_kerf, width=8).pack(side=tk.RIGHT)
+        tk.Label(form, text="Negative = Shrink (Holes). Positive = Expand (Inlay).", font=("Arial", 7), fg="gray").pack(anchor="e")
+        
+        # Reg Marks
+        tk.Checkbutton(form, text="Add Registration Marks (Corners)", variable=self.exp_2d_reg_marks).pack(pady=10, anchor="w")
+        
+        # DXF
+        tk.Checkbutton(form, text="Include DXF Files", variable=self.exp_dxf).pack(pady=5, anchor="w")
+        
+        tk.Button(form, text="Export Vectors", command=lambda: self.trigger_2d_export(win), bg="blue", fg="white").pack(pady=20, fill="x")
+
+    def trigger_2d_export(self, parent_window):
+        target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
+        if not target_dir: return
+        self.last_opened_dir = target_dir 
+        parent_window.destroy()
+        self.progress['mode'] = 'determinate'
+        self.progress_var.set(0)
+        threading.Thread(target=self.export_2d_thread, args=(target_dir,)).start()
 
     def open_3d_export_window(self, event=None):
         if not self.processed_data:
@@ -1211,15 +1262,6 @@ class CamoStudioApp:
                         def __init__(self, w, h): self.width, self.height = w, h
                     canvas.on_resize(MockEvent(w, h))
 
-    def export_bundle_2d(self, event=None):
-        if not self.processed_data: return
-        target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
-        if not target_dir: return
-        self.last_opened_dir = target_dir 
-        self.progress['mode'] = 'determinate'
-        self.progress_var.set(0)
-        threading.Thread(target=self.export_2d_thread, args=(target_dir,)).start()
-
     def export_2d_thread(self, target_dir):
         try:
             centers = self.processed_data["centers"]
@@ -1228,6 +1270,11 @@ class CamoStudioApp:
             height = self.processed_data["height"]
             tmpl = self.config["filename_template"].get()
             smooth = self.config["smoothing"].get() 
+            
+            # Settings
+            kerf = self.exp_2d_kerf.get()
+            do_reg = self.exp_2d_reg_marks.get()
+            do_dxf = self.exp_dxf.get()
             
             # Generate Guide Image
             create_guide_image(centers, os.path.join(target_dir, "_layer_guide.png"))
@@ -1238,37 +1285,91 @@ class CamoStudioApp:
                 hex_c = bgr_to_hex(bgr)
                 fname = tmpl.replace("%INPUTFILENAME%", self.current_base_name).replace("%COLOR%", hex_c.replace("#","")).replace("%INDEX%", str(i+1))
                 
-                # SVG Export
                 if not fname.endswith(".svg"): fname_svg = fname + ".svg"
                 else: fname_svg = fname
                 path = os.path.join(target_dir, fname_svg)
+                
                 dwg = svgwrite.Drawing(path, profile='tiny', size=(width, height))
                 
                 contours, _ = cv2.findContours(masks[i], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                dxf_contours = [] # Collect for DXF
+                
+                final_polys = [] # List of shapely polygons for DXF export
                 
                 for c in contours:
                     epsilon = smooth * cv2.arcLength(c, True)
                     approx = cv2.approxPolyDP(c, epsilon, True)
                     if len(approx) < 3: continue
-                    dxf_contours.append(approx)
                     
                     pts = approx.squeeze().tolist()
                     if not pts: continue
-                    if isinstance(pts[0], int): d = f"M {pts[0]},{pts[1]} "
+                    
+                    # Kerf Compensation Logic using Shapely
+                    if kerf != 0:
+                        try:
+                            poly = Polygon(pts)
+                            if not poly.is_valid: poly = poly.buffer(0)
+                            # Buffer (Positive expands, Negative shrinks)
+                            buffered = poly.buffer(kerf, join_style=2) # 2=Mitre
+                            
+                            if buffered.is_empty: continue
+                            
+                            # Handle MultiPolygon result from buffer
+                            if isinstance(buffered, MultiPolygon):
+                                geoms = buffered.geoms
+                            else:
+                                geoms = [buffered]
+                                
+                            for g in geoms:
+                                final_polys.append(g)
+                                # Write to SVG
+                                ext_pts = list(g.exterior.coords)
+                                d = f"M {ext_pts[0][0]},{ext_pts[0][1]} "
+                                for p in ext_pts[1:]: d += f"L {p[0]},{p[1]} "
+                                d += "Z "
+                                dwg.add(dwg.path(d=d, fill=hex_c, stroke='none'))
+                                
+                        except: continue
                     else:
-                        d = f"M {pts[0][0]},{pts[0][1]} "
-                        for p in pts[1:]: d += f"L {p[0]},{p[1]} "
-                    d += "Z "
-                    dwg.add(dwg.path(d=d, fill=hex_c, stroke='none'))
+                        # Standard Write
+                        if isinstance(pts[0], int): d = f"M {pts[0]},{pts[1]} "
+                        else:
+                            d = f"M {pts[0][0]},{pts[0][1]} "
+                            for p in pts[1:]: d += f"L {p[0]},{p[1]} "
+                        d += "Z "
+                        dwg.add(dwg.path(d=d, fill=hex_c, stroke='none'))
+                        final_polys.append(Polygon(pts))
+
+                # Registration Marks (Corners)
+                if do_reg:
+                    m_len = 20 # Length of crosshair
+                    m_off = 10 # Offset from edge
+                    # 4 Corners
+                    corners = [
+                        (m_off, m_off), (width-m_off, m_off), 
+                        (width-m_off, height-m_off), (m_off, height-m_off)
+                    ]
+                    for cx, cy in corners:
+                        # Vertical Line
+                        dwg.add(dwg.line((cx, cy-m_len/2), (cx, cy+m_len/2), stroke="black", stroke_width=2))
+                        # Horizontal Line
+                        dwg.add(dwg.line((cx-m_len/2, cy), (cx+m_len/2, cy), stroke="black", stroke_width=2))
+                        # Circle
+                        dwg.add(dwg.circle(center=(cx, cy), r=m_len/2, fill="none", stroke="black", stroke_width=2))
+                        
+                        # Add to DXF list as simple lines (circle approx not implemented for DXF simplicity)
+                        # Crosshairs
+                        final_polys.append(LineString([(cx, cy-m_len/2), (cx, cy+m_len/2)]))
+                        final_polys.append(LineString([(cx-m_len/2, cy), (cx+m_len/2, cy)]))
+
                 dwg.save()
                 
-                # DXF Export (Optional)
-                fname_dxf = fname.replace(".svg", ".dxf")
-                if not fname_dxf.endswith(".dxf"): fname_dxf += ".dxf"
-                write_simple_dxf(os.path.join(target_dir, fname_dxf), dxf_contours, height) # height passed for coord flip
+                # DXF Export
+                if do_dxf:
+                    fname_dxf = fname.replace(".svg", ".dxf")
+                    if not fname_dxf.endswith(".dxf"): fname_dxf += ".dxf"
+                    write_simple_dxf(os.path.join(target_dir, fname_dxf), final_polys, height)
                 
-            self.root.after(0, lambda: messagebox.showinfo("Success", "2D Export (SVG + DXF + Guide) Complete"))
+            self.root.after(0, lambda: messagebox.showinfo("Success", "2D Export Complete"))
         except Exception as e:
             print(e)
             self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
