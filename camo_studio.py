@@ -1,0 +1,1133 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+import cv2
+import numpy as np
+import svgwrite
+import os
+import threading
+import json
+from PIL import Image, ImageTk
+
+# --- 3D IMPORTS ---
+import trimesh
+from shapely.geometry import Polygon, MultiPolygon, LineString
+from shapely.ops import unary_union, nearest_points
+
+# --- DEFAULTS ---
+DEFAULT_MAX_COLORS = 4
+DEFAULT_MAX_WIDTH = 1000
+DEFAULT_SMOOTHING = 0.0005 
+DEFAULT_DENOISE = 5
+DEFAULT_MIN_BLOB = 50
+DEFAULT_TEMPLATE = "%INPUTFILENAME%-%COLOR%-%INDEX%"
+
+def bgr_to_hex(bgr):
+    return '#{:02x}{:02x}{:02x}'.format(int(bgr[2]), int(bgr[1]), int(bgr[0]))
+
+def is_bright(bgr):
+    return (bgr[2] * 0.299 + bgr[1] * 0.587 + bgr[0] * 0.114) > 186
+
+def filter_small_blobs(mask, min_size):
+    """ Optimized area filtering using Connected Components (Raster). """
+    if min_size <= 0: return mask
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    valid_labels = (stats[:, cv2.CC_STAT_AREA] >= min_size)
+    valid_labels[0] = False 
+    lut = np.zeros(n, dtype=np.uint8)
+    lut[valid_labels] = 255
+    return lut[labels]
+
+class AutoResizingCanvas(tk.Canvas):
+    def __init__(self, parent, pil_image, **kwargs):
+        super().__init__(parent, **kwargs)
+        self.pil_image = pil_image
+        self.displayed_image = None 
+        self.scale_ratio = 1.0
+        self.offset_x = 0
+        self.offset_y = 0
+        self.bind("<Configure>", self.on_resize)
+
+    def on_resize(self, event):
+        if not self.pil_image: return
+        canvas_width = event.width
+        canvas_height = event.height
+        if canvas_width < 10 or canvas_height < 10: return
+
+        img_w, img_h = self.pil_image.size
+        self.scale_ratio = min(canvas_width / img_w, canvas_height / img_h)
+        
+        new_w = int(img_w * self.scale_ratio)
+        new_h = int(img_h * self.scale_ratio)
+        
+        resized_pil = self.pil_image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.displayed_image = ImageTk.PhotoImage(resized_pil)
+        
+        self.delete("all")
+        self.offset_x = (canvas_width - new_w) // 2
+        self.offset_y = (canvas_height - new_h) // 2
+        self.create_image(self.offset_x, self.offset_y, anchor="nw", image=self.displayed_image)
+
+    def get_image_coordinates(self, screen_x, screen_y):
+        if not self.pil_image: return None
+        rel_x = screen_x - self.offset_x
+        rel_y = screen_y - self.offset_y
+        img_x = int(rel_x / self.scale_ratio)
+        img_y = int(rel_y / self.scale_ratio)
+        w, h = self.pil_image.size
+        if 0 <= img_x < w and 0 <= img_y < h:
+            return (img_x, img_y)
+        return None
+
+class CamoStudioApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Camo Studio v29 - Persistent Config")
+        self.root.geometry("1200x850")
+        
+        # --- 1. Define Settings File & Directory Memory ---
+        self.settings_file = "user_settings.json"
+        self.last_opened_dir = os.getcwd()
+
+        # --- 2. Initialize Variables with Defaults ---
+        self.config = {
+            "max_colors": tk.IntVar(value=DEFAULT_MAX_COLORS),
+            "max_width": tk.IntVar(value=DEFAULT_MAX_WIDTH),
+            "denoise_strength": tk.IntVar(value=DEFAULT_DENOISE),
+            "min_blob_size": tk.IntVar(value=DEFAULT_MIN_BLOB),
+            "filename_template": tk.StringVar(value=DEFAULT_TEMPLATE),
+            "smoothing": tk.DoubleVar(value=DEFAULT_SMOOTHING),
+            "orphaned_blobs": tk.BooleanVar(value=False) 
+        }
+        
+        # 3D Export Vars
+        self.exp_units = tk.StringVar(value="mm")
+        self.exp_width = tk.DoubleVar(value=100.0)
+        self.exp_height = tk.DoubleVar(value=2.0) 
+        self.exp_border = tk.DoubleVar(value=5.0)
+        self.exp_bridge = tk.DoubleVar(value=2.0)
+        self.exp_invert = tk.BooleanVar(value=True)
+        
+        # --- 3. Load Persistent Settings ---
+        self.load_app_settings()
+        
+        self.original_image_path = None
+        self.cv_original_full = None 
+        self.current_base_name = "camo"
+        
+        # State
+        self.picked_colors = [] 
+        self.layer_vars = []
+        self.select_vars = [] 
+        self.bulk_target_layer = tk.IntVar(value=1)
+        self.last_select_index = -1 
+        self.processed_data = None 
+        self.preview_images = {}
+
+        self._create_ui()
+        self._bind_shortcuts()
+        
+        # --- 4. Bind Close Event to Save ---
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def load_app_settings(self):
+        """Loads configuration and last directory from JSON on startup."""
+        if not os.path.exists(self.settings_file): return
+        try:
+            with open(self.settings_file, 'r') as f:
+                data = json.load(f)
+            
+            # Load Config Dict
+            cfg = data.get("config", {})
+            for k, v in cfg.items():
+                if k in self.config:
+                    try:
+                        self.config[k].set(v)
+                    except: pass
+            
+            # Load Export Settings
+            exp = data.get("export", {})
+            self.exp_units.set(exp.get("units", "mm"))
+            self.exp_width.set(exp.get("width", 100.0))
+            self.exp_height.set(exp.get("height", 2.0))
+            self.exp_border.set(exp.get("border", 5.0))
+            self.exp_bridge.set(exp.get("bridge", 2.0))
+            self.exp_invert.set(exp.get("invert", True))
+            
+            # Load Last Directory
+            last_dir = data.get("last_directory", "")
+            if last_dir and os.path.exists(last_dir):
+                self.last_opened_dir = last_dir
+                
+            print("Settings loaded successfully.")
+                
+        except Exception as e:
+            print(f"Failed to load settings: {e}")
+
+    def save_app_settings(self):
+        """Saves current configuration and directory to JSON."""
+        data = {
+            "config": {k: v.get() for k, v in self.config.items()},
+            "export": {
+                "units": self.exp_units.get(),
+                "width": self.exp_width.get(),
+                "height": self.exp_height.get(),
+                "border": self.exp_border.get(),
+                "bridge": self.exp_bridge.get(),
+                "invert": self.exp_invert.get()
+            },
+            "last_directory": self.last_opened_dir
+        }
+        try:
+            with open(self.settings_file, 'w') as f:
+                json.dump(data, f, indent=4)
+            print("Settings saved.")
+        except Exception as e:
+            print(f"Failed to save settings: {e}")
+
+    def on_close(self):
+        """Handler for window close event."""
+        self.save_app_settings()
+        self.root.destroy()
+
+    def _bind_shortcuts(self):
+        self.root.bind("<Control-n>", lambda e: self.reset_project())
+        self.root.bind("<Control-o>", lambda e: self.load_image())
+        self.root.bind("<Control-s>", lambda e: self.save_project_json())
+        self.root.bind("<Control-Shift-O>", lambda e: self.load_project_json())
+        self.root.bind("<Control-p>", self.trigger_process)
+        self.root.bind("<Control-y>", self.yolo_scan)
+        self.root.bind("<Control-e>", self.export_bundle_2d)
+        self.root.bind("<Control-comma>", self.open_config_window)
+
+    def _create_ui(self):
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="New Project (Ctrl+N)", command=self.reset_project)
+        file_menu.add_command(label="Open Image... (Ctrl+O)", command=lambda: self.load_image())
+        file_menu.add_separator()
+        file_menu.add_command(label="Open Project... (Ctrl+Shift+O)", command=self.load_project_json)
+        file_menu.add_command(label="Save Project (Ctrl+S)", command=self.save_project_json)
+        file_menu.add_separator()
+        file_menu.add_command(label="Export SVG Bundle (Ctrl+E)", command=self.export_bundle_2d)
+        file_menu.add_command(label="Export STL Models (Ctrl+Shift+E)", command=self.open_3d_export_window)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self.on_close) # Use on_close here too
+        menubar.add_cascade(label="File", menu=file_menu)
+        
+        prop_menu = tk.Menu(menubar, tearoff=0)
+        prop_menu.add_command(label="Configuration (Ctrl+,)", command=self.open_config_window)
+        menubar.add_cascade(label="Properties", menu=prop_menu)
+        self.root.config(menu=menubar)
+
+        self.toolbar = tk.Frame(self.root, padx=10, pady=10, bg="#ddd")
+        self.toolbar.pack(side=tk.TOP, fill=tk.X)
+        tk.Label(self.toolbar, text="Pick Colors -> Assign Layers -> Process -> Export", bg="#ddd", fg="#555").pack(side=tk.LEFT)
+        self.btn_process = tk.Button(self.toolbar, text="PROCESS IMAGE", command=self.trigger_process, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"))
+        self.btn_process.pack(side=tk.RIGHT, padx=10)
+
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(expand=True, fill="both", padx=10, pady=5)
+        
+        self.tab_main = tk.Frame(self.notebook)
+        self.notebook.add(self.tab_main, text="Input / Preview")
+        
+        self.input_container = tk.Frame(self.tab_main)
+        self.input_container.pack(fill="both", expand=True)
+
+        self.swatch_sidebar = tk.Frame(self.input_container, width=280, bg="#f0f0f0", padx=5, pady=5)
+        self.swatch_sidebar.pack(side=tk.LEFT, fill="y")
+        self.swatch_sidebar.pack_propagate(False) 
+        
+        self.sidebar_tools = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
+        self.sidebar_tools.pack(side=tk.TOP, fill="x", pady=(0, 5))
+        tk.Button(self.sidebar_tools, text="YOLO Scan (Auto-Detect)", command=self.yolo_scan, 
+                  bg="#FF9800", fg="white", font=("Arial", 9, "bold")).pack(fill="x", padx=5)
+
+        self.bulk_frame = tk.Frame(self.swatch_sidebar, bg="#e0e0e0", padx=5, pady=5)
+        self.bulk_frame.pack(side=tk.BOTTOM, fill="x")
+        
+        bf_header = tk.Frame(self.bulk_frame, bg="#e0e0e0")
+        bf_header.pack(fill="x", pady=(0,2))
+        tk.Label(bf_header, text="Bulk Assign:", bg="#e0e0e0", font=("Arial", 8, "bold")).pack(side=tk.LEFT)
+        tk.Button(bf_header, text="Clear List", command=self.reset_picks, bg="#ffdddd", font=("Arial", 7)).pack(side=tk.RIGHT)
+
+        bf_inner = tk.Frame(self.bulk_frame, bg="#e0e0e0")
+        bf_inner.pack(fill="x", pady=2)
+        tk.Label(bf_inner, text="Sel. to Layer:", bg="#e0e0e0", font=("Arial", 8)).pack(side=tk.LEFT)
+        tk.Spinbox(bf_inner, from_=1, to=999, width=4, textvariable=self.bulk_target_layer).pack(side=tk.LEFT, padx=5)
+        tk.Button(bf_inner, text="Apply", command=self.apply_bulk_layer, bg="#ccc", font=("Arial", 8)).pack(side=tk.LEFT)
+
+        self.swatch_container = tk.Frame(self.swatch_sidebar, bg="#f0f0f0")
+        self.swatch_container.pack(side=tk.LEFT, fill="both", expand=True)
+        
+        self.swatch_canvas = tk.Canvas(self.swatch_container, bg="#f0f0f0", highlightthickness=0)
+        self.swatch_scrollbar = ttk.Scrollbar(self.swatch_container, orient="vertical", command=self.swatch_canvas.yview)
+        
+        self.swatch_list_frame = tk.Frame(self.swatch_canvas, bg="#f0f0f0")
+        self.swatch_list_frame.bind("<Configure>", lambda e: self.swatch_canvas.configure(scrollregion=self.swatch_canvas.bbox("all")))
+        self.swatch_window = self.swatch_canvas.create_window((0, 0), window=self.swatch_list_frame, anchor="nw")
+        self.swatch_canvas.bind("<Configure>", lambda e: self.swatch_canvas.itemconfig(self.swatch_window, width=e.width))
+        self.swatch_canvas.configure(yscrollcommand=self.swatch_scrollbar.set)
+        
+        self.swatch_scrollbar.pack(side=tk.RIGHT, fill="y")
+        self.swatch_canvas.pack(side=tk.LEFT, fill="both", expand=True)
+        
+        def _on_mousewheel(event):
+            self.swatch_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        self.swatch_canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        self.canvas_frame = tk.Frame(self.input_container, bg="#333")
+        self.canvas_frame.pack(side=tk.LEFT, fill="both", expand=True)
+        
+        # --- OPEN BUTTON CENTERED ---
+        self.btn_main_load = tk.Button(self.canvas_frame, text="OPEN IMAGE", command=lambda: self.load_image(),
+                                       font=("Arial", 16, "bold"), bg="#555", fg="white", padx=20, pady=10, cursor="hand2")
+        self.btn_main_load.place(relx=0.5, rely=0.5, anchor="center")
+        
+        self.main_canvas = None
+
+        self.progress_var = tk.DoubleVar()
+        self.progress = ttk.Progressbar(self.root, variable=self.progress_var, maximum=100)
+        self.progress.pack(side=tk.BOTTOM, fill=tk.X)
+        self.lbl_status = tk.Label(self.root, text="Ready.", anchor="w")
+        self.lbl_status.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def open_config_window(self, event=None):
+        top = tk.Toplevel(self.root)
+        top.title("Properties")
+        top.geometry("600x600")
+        form = tk.Frame(top, padx=20, pady=20)
+        form.pack(fill="both", expand=True)
+        form.columnconfigure(1, weight=1)
+        
+        row = 0
+        tk.Label(form, text="Max Color Count (Auto-Mode):").grid(row=row, column=0, sticky="w")
+        tk.Entry(form, textvariable=self.config["max_colors"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        tk.Label(form, text="Denoise Strength:").grid(row=row, column=0, sticky="w")
+        tk.Scale(form, from_=0, to=20, orient=tk.HORIZONTAL, variable=self.config["denoise_strength"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        tk.Label(form, text="Path Smoothing:").grid(row=row, column=0, sticky="w")
+        tk.Scale(form, from_=0.0001, to=0.005, resolution=0.0001, orient=tk.HORIZONTAL, variable=self.config["smoothing"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        tk.Label(form, text="Lower = More Detail. Higher = Smoother.", font=("Arial", 8), fg="gray").grid(row=row, column=1, sticky="w"); row+=1
+        tk.Label(form, text="Min Blob Size (px):").grid(row=row, column=0, sticky="w")
+        tk.Entry(form, textvariable=self.config["min_blob_size"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        
+        tk.Label(form, text="Orphaned Blobs:").grid(row=row, column=0, sticky="w")
+        tk.Checkbutton(form, text="Detect & Assign Random Color", variable=self.config["orphaned_blobs"]).grid(row=row, column=1, sticky="w", pady=5); row+=1
+        
+        tk.Label(form, text="Max Width (px):").grid(row=row, column=0, sticky="w")
+        tk.Entry(form, textvariable=self.config["max_width"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        tk.Label(form, text="Filename Template:").grid(row=row, column=0, sticky="w")
+        tk.Entry(form, textvariable=self.config["filename_template"]).grid(row=row, column=1, sticky="ew", pady=5); row+=1
+        tk.Button(top, text="Close", command=top.destroy).pack(pady=10)
+
+    def open_3d_export_window(self, event=None):
+        if not self.processed_data:
+            messagebox.showwarning("No Data", "Process an image first.")
+            return
+        win = tk.Toplevel(self.root)
+        win.title("Export 3D Models")
+        win.geometry("450x450")
+        form = tk.Frame(win, padx=20, pady=20)
+        form.pack(fill="both", expand=True)
+        tk.Label(form, text="3D Stencil Settings", font=("Arial", 10, "bold")).pack(pady=10)
+        tk.Checkbutton(form, text="Invert (Stencil Mode)", variable=self.exp_invert, font=("Arial", 9, "bold")).pack(pady=5)
+        tk.Label(form, text="Checked: Blobs are holes.\nUnchecked: Blobs are solid.", font=("Arial", 8), fg="gray").pack(pady=(0, 10))
+        u_frame = tk.Frame(form); u_frame.pack(fill="x", pady=5)
+        tk.Label(u_frame, text="Units:").pack(side=tk.LEFT)
+        tk.Radiobutton(u_frame, text="Millimeters", variable=self.exp_units, value="mm").pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(u_frame, text="Inches", variable=self.exp_units, value="in").pack(side=tk.LEFT)
+        w_frame = tk.Frame(form); w_frame.pack(fill="x", pady=5)
+        tk.Label(w_frame, text="Total Width:").pack(side=tk.LEFT)
+        tk.Entry(w_frame, textvariable=self.exp_width, width=10).pack(side=tk.RIGHT)
+        h_frame = tk.Frame(form); h_frame.pack(fill="x", pady=5)
+        tk.Label(h_frame, text="Extrusion Height:").pack(side=tk.LEFT)
+        tk.Entry(h_frame, textvariable=self.exp_height, width=10).pack(side=tk.RIGHT)
+        b_frame = tk.Frame(form); b_frame.pack(fill="x", pady=5)
+        tk.Label(b_frame, text="Solid Border Width:").pack(side=tk.LEFT)
+        tk.Entry(b_frame, textvariable=self.exp_border, width=10).pack(side=tk.RIGHT)
+        
+        br_frame = tk.Frame(form); br_frame.pack(fill="x", pady=5)
+        tk.Label(br_frame, text="Stencil Bridge Width:").pack(side=tk.LEFT)
+        tk.Entry(br_frame, textvariable=self.exp_bridge, width=10).pack(side=tk.RIGHT)
+        tk.Label(form, text="(Automatically connects floating islands)", font=("Arial", 7), fg="gray").pack()
+
+        tk.Button(form, text="Export STL Files", command=lambda: self.trigger_3d_export(win), bg="blue", fg="white").pack(pady=20, fill="x")
+
+    def trigger_3d_export(self, parent_window):
+        # Update directory from dialog
+        target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
+        if not target_dir: return
+        self.last_opened_dir = target_dir # Remember this dir
+        
+        parent_window.destroy()
+        self.progress['mode'] = 'determinate'
+        self.progress_var.set(0)
+        threading.Thread(target=self.export_3d_thread, args=(target_dir,)).start()
+
+    def reset_project(self):
+        """Clears all data and UI to start fresh."""
+        if self.picked_colors and not messagebox.askyesno("New Project", "Discard current changes?"):
+            return
+        
+        self.original_image_path = None
+        self.cv_original_full = None
+        self.current_base_name = "camo"
+        
+        # Clear Data
+        self.picked_colors = []
+        self.layer_vars = []
+        self.select_vars = []
+        self.last_select_index = -1
+        self.processed_data = None
+        self.preview_images = {}
+        
+        # Clear UI
+        self.update_pick_ui()
+        if self.main_canvas: 
+            self.main_canvas.destroy()
+            self.main_canvas = None
+        
+        # Remove extra tabs
+        for tab in self.notebook.tabs():
+            if tab != str(self.tab_main): self.notebook.forget(tab)
+            
+        # Show Open Button
+        self.btn_main_load.place(relx=0.5, rely=0.5, anchor="center")
+        self.lbl_status.config(text="Project cleared.")
+
+    def load_image(self, from_path=None):
+        path = from_path
+        if not path:
+            path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
+        
+        if not path: return
+        self.last_opened_dir = os.path.dirname(path) # Remember this dir
+        
+        # If file not found (e.g. moved project file)
+        if not os.path.exists(path):
+            messagebox.showerror("Error", f"Image file not found:\n{path}\nPlease locate it manually.")
+            path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Images", "*.jpg *.jpeg *.png *.bmp")])
+            if not path: return
+            self.last_opened_dir = os.path.dirname(path)
+
+        self.original_image_path = path
+        self.current_base_name = os.path.splitext(os.path.basename(path))[0]
+        self.cv_original_full = cv2.imread(path)
+        rgb_img = cv2.cvtColor(self.cv_original_full, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb_img)
+        
+        # Hide the center button
+        self.btn_main_load.place_forget()
+        
+        if self.main_canvas: self.main_canvas.destroy()
+        self.main_canvas = AutoResizingCanvas(self.canvas_frame, pil_image=pil_img, bg="#333", highlightthickness=0)
+        self.main_canvas.pack(fill="both", expand=True)
+        self.main_canvas.bind("<Button-1>", self.on_canvas_click)
+        
+        # Only reset picks if we are doing a manual load, not a project load
+        if from_path is None:
+            self.reset_picks()
+            
+        self.lbl_status.config(text=f"Loaded: {os.path.basename(path)}")
+
+    def save_project_json(self):
+        if not self.original_image_path:
+            messagebox.showwarning("Warning", "No image loaded to save.")
+            return
+
+        # Sanitize colors: Convert numpy.uint8 to standard python int
+        sanitized_colors = [tuple(int(x) for x in c) for c in self.picked_colors]
+
+        data = {
+            "version": "1.0",
+            "image_path": self.original_image_path,
+            "config": {k: v.get() for k, v in self.config.items()},
+            "colors": sanitized_colors, 
+            "layers": [v.get() for v in self.layer_vars],
+            "3d_export": {
+                "units": self.exp_units.get(),
+                "width": self.exp_width.get(),
+                "height": self.exp_height.get(),
+                "border": self.exp_border.get(),
+                "bridge": self.exp_bridge.get(),
+                "invert": self.exp_invert.get()
+            }
+        }
+        
+        path = filedialog.asksaveasfilename(initialdir=self.last_opened_dir, defaultextension=".json", filetypes=[("Camo Project", "*.json")])
+        if path:
+            self.last_opened_dir = os.path.dirname(path) # Remember this dir
+            try:
+                with open(path, 'w') as f:
+                    json.dump(data, f, indent=4)
+                self.lbl_status.config(text=f"Project saved to {os.path.basename(path)}")
+            except Exception as e:
+                messagebox.showerror("Save Error", str(e))
+
+    def load_project_json(self):
+        if self.picked_colors and not messagebox.askyesno("Open Project", "Discard current changes?"):
+            return
+
+        path = filedialog.askopenfilename(initialdir=self.last_opened_dir, filetypes=[("Camo Project", "*.json")])
+        if not path: return
+        self.last_opened_dir = os.path.dirname(path) # Remember this dir
+        
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+            
+            # 1. Load Image
+            self.load_image(from_path=data.get("image_path"))
+            
+            # 2. Restore Config
+            if "config" in data:
+                for k, v in data["config"].items():
+                    if k in self.config:
+                        try:
+                            self.config[k].set(v)
+                        except: pass
+            
+            # 3. Restore 3D Settings
+            if "3d_export" in data:
+                ex = data["3d_export"]
+                self.exp_units.set(ex.get("units", "mm"))
+                self.exp_width.set(ex.get("width", 100.0))
+                self.exp_height.set(ex.get("height", 2.0))
+                self.exp_border.set(ex.get("border", 5.0))
+                self.exp_bridge.set(ex.get("bridge", 2.0))
+                self.exp_invert.set(ex.get("invert", True))
+
+            # 4. Restore Palette & Layers
+            self.picked_colors = [tuple(c) for c in data.get("colors", [])]
+            saved_layers = data.get("layers", [])
+            
+            self.layer_vars = []
+            self.select_vars = []
+            
+            for i in range(len(self.picked_colors)):
+                lid = saved_layers[i] if i < len(saved_layers) else 1
+                self.layer_vars.append(tk.IntVar(value=lid))
+                self.select_vars.append(tk.BooleanVar(value=False))
+                
+            self.update_pick_ui()
+            self.lbl_status.config(text=f"Project loaded: {os.path.basename(path)}")
+            
+        except Exception as e:
+            messagebox.showerror("Load Error", f"Failed to load project:\n{str(e)}")
+
+    def yolo_scan(self, event=None):
+        if self.cv_original_full is None: 
+            messagebox.showinfo("Info", "Load an image first.")
+            return
+            
+        if self.picked_colors:
+            if not messagebox.askyesno("YOLO Mode", "This will replace your current palette. Continue?"):
+                return
+
+        self.picked_colors = []
+        self.layer_vars = []
+        self.select_vars = []
+        
+        img = self.cv_original_full.copy()
+        max_analysis_w = 300 
+        h, w = img.shape[:2]
+        if w > max_analysis_w:
+            scale = max_analysis_w / w
+            img = cv2.resize(img, (max_analysis_w, int(h * scale)), interpolation=cv2.INTER_AREA)
+            
+        data = img.reshape((-1, 3)).astype(np.float32)
+        
+        unique_colors = np.unique(data.astype(np.uint8), axis=0)
+        final_colors = []
+        
+        if len(unique_colors) <= 64:
+            print(f"YOLO: Found {len(unique_colors)} unique colors. Using Exact.")
+            final_colors = [tuple(int(x) for x in c) for c in unique_colors]
+        else:
+            print(f"YOLO: Too many colors. Quantizing to 32.")
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+            ret, label, center = cv2.kmeans(data, 32, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+            center = np.uint8(center)
+            final_colors = [tuple(int(x) for x in c) for c in center]
+            
+        self.picked_colors = final_colors
+        self.reorder_palette_by_similarity()
+        
+        target_layers = self.config["max_colors"].get()
+        if len(self.picked_colors) > target_layers:
+            print(f"YOLO: Grouping {len(self.picked_colors)} colors into {target_layers} layers.")
+            palette_data = np.array(self.picked_colors, dtype=np.float32)
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+            ret, labels, centers = cv2.kmeans(palette_data, target_layers, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+            centers_info = []
+            for i, center in enumerate(centers):
+                centers_info.append( {'id': i, 'val': sum(center)} )
+            centers_info.sort(key=lambda x: x['val'], reverse=True)
+            cluster_to_layer_map = {}
+            for new_layer_num, info in enumerate(centers_info):
+                cluster_to_layer_map[info['id']] = new_layer_num + 1
+            for i, cluster_idx in enumerate(labels.flatten()):
+                new_layer_id = cluster_to_layer_map[cluster_idx]
+                self.layer_vars[i].set(new_layer_id)
+
+        self.update_pick_ui()
+        self.lbl_status.config(text=f"YOLO Mode: {len(self.picked_colors)} colors grouped into {target_layers} layers.")
+
+    def on_canvas_click(self, event):
+        if self.cv_original_full is None: return
+        coords = self.main_canvas.get_image_coordinates(event.x, event.y)
+        if coords:
+            x, y = coords
+            if y < self.cv_original_full.shape[0] and x < self.cv_original_full.shape[1]:
+                bgr_color = self.cv_original_full[y, x]
+                bgr_tuple = tuple(int(x) for x in bgr_color)
+                if bgr_tuple in self.picked_colors:
+                    self.lbl_status.config(text="Color already in palette.")
+                    return
+                self.picked_colors.append(bgr_tuple)
+                self.reorder_palette_by_similarity()
+                self.update_pick_ui()
+                self.lbl_status.config(text=f"Color added & sorted. Total: {len(self.picked_colors)}")
+
+    def reorder_palette_by_similarity(self):
+        if not self.picked_colors: return
+        while len(self.layer_vars) < len(self.picked_colors):
+             existing_ids = [v.get() for v in self.layer_vars]
+             next_id = max(existing_ids) + 1 if existing_ids else 1
+             self.layer_vars.append(tk.IntVar(value=next_id))
+        while len(self.select_vars) < len(self.picked_colors):
+             self.select_vars.append(tk.BooleanVar(value=False))
+
+        groups = {}
+        for i, color in enumerate(self.picked_colors):
+            lid = self.layer_vars[i].get()
+            if lid not in groups: groups[lid] = []
+            groups[lid].append({'color': color, 'var': self.layer_vars[i], 'select': self.select_vars[i]})
+
+        group_metrics = []
+        for lid, items in groups.items():
+            avg_b = np.mean([sum(x['color']) for x in items])
+            group_metrics.append({'lid': lid, 'brightness': avg_b, 'items': items})
+        
+        group_metrics.sort(key=lambda x: x['brightness'], reverse=True)
+
+        new_colors = []
+        new_layer_vars = []
+        new_select_vars = []
+        current_layer_num = 1
+        
+        for g in group_metrics:
+            items = g['items']
+            items.sort(key=lambda x: sum(x['color']), reverse=True)
+            for item in items:
+                new_colors.append(item['color'])
+                new_layer_vars.append(tk.IntVar(value=current_layer_num))
+                new_select_vars.append(item['select'])
+            current_layer_num += 1
+
+        self.picked_colors = new_colors
+        self.layer_vars = new_layer_vars
+        self.select_vars = new_select_vars
+
+    def remove_color(self, index):
+        if 0 <= index < len(self.picked_colors):
+            del self.picked_colors[index]
+            del self.layer_vars[index] 
+            del self.select_vars[index]
+            self.compact_layer_ids()
+            self.update_pick_ui()
+            self.lbl_status.config(text=f"Color removed. Total: {len(self.picked_colors)}")
+
+    def reset_picks(self, event=None):
+        self.picked_colors = []
+        self.layer_vars = []
+        self.select_vars = []
+        self.last_select_index = -1
+        self.update_pick_ui()
+        if self.cv_original_full is not None:
+            for tab in self.notebook.tabs():
+                if tab != str(self.tab_main): self.notebook.forget(tab)
+
+    def apply_bulk_layer(self):
+        target = self.bulk_target_layer.get()
+        changed = False
+        for i, var in enumerate(self.select_vars):
+            if var.get():
+                self.layer_vars[i].set(target)
+                changed = True
+                var.set(False) 
+        if changed:
+            self.compact_layer_ids()
+            self.update_pick_ui()
+            self.lbl_status.config(text="Bulk assignment complete. Layers re-numbered.")
+        else:
+            messagebox.showinfo("Info", "No colors selected.")
+
+    def compact_layer_ids(self):
+        current_ids = sorted(list(set(v.get() for v in self.layer_vars)))
+        id_map = {old: new+1 for new, old in enumerate(current_ids)}
+        for var in self.layer_vars:
+            var.set(id_map[var.get()])
+
+    def handle_click_selection(self, index, event):
+        if event and (event.state & 0x0001): # Shift Key Held
+            if self.last_select_index != -1:
+                start = min(self.last_select_index, index)
+                end = max(self.last_select_index, index)
+                for i in range(start, end + 1):
+                    self.select_vars[i].set(True)
+        else:
+            self.last_select_index = index
+
+    def update_pick_ui(self):
+        for widget in self.swatch_list_frame.winfo_children():
+            widget.destroy()
+        if not self.picked_colors:
+            tk.Label(self.swatch_list_frame, text="Auto-Mode", bg="#f0f0f0").pack(pady=10)
+            return
+        h_frame = tk.Frame(self.swatch_list_frame, bg="#f0f0f0")
+        h_frame.pack(fill="x", pady=2)
+        tk.Label(h_frame, text="Sel", bg="#f0f0f0", font=("Arial", 7)).pack(side=tk.LEFT, padx=2)
+        tk.Label(h_frame, text="Color", bg="#f0f0f0", font=("Arial", 8, "bold")).pack(side=tk.LEFT, padx=5)
+        btn_sort = tk.Button(h_frame, text="Resort", command=lambda: [self.reorder_palette_by_similarity(), self.update_pick_ui()], font=("Arial", 7), padx=2, pady=0)
+        btn_sort.pack(side=tk.RIGHT, padx=2)
+        tk.Label(h_frame, text="Layer #", bg="#f0f0f0", font=("Arial", 8, "bold")).pack(side=tk.RIGHT, padx=2)
+        for i, bgr in enumerate(self.picked_colors):
+            var = self.layer_vars[i]
+            sel_var = self.select_vars[i]
+            hex_c = bgr_to_hex(bgr)
+            fg = "black" if is_bright(bgr) else "white"
+            f = tk.Frame(self.swatch_list_frame, bg=hex_c, height=30, highlightthickness=1, highlightbackground="#999")
+            f.pack(fill="x", padx=5, pady=2)
+            f.pack_propagate(False) 
+            chk = tk.Checkbutton(f, variable=sel_var, bg=hex_c, activebackground=hex_c)
+            chk.pack(side=tk.LEFT, padx=2)
+            chk.bind("<Shift-Button-1>", lambda e, idx=i: self.handle_click_selection(idx, e))
+            chk.bind("<Button-1>", lambda e, idx=i: self.handle_click_selection(idx, None))
+            btn_del = tk.Label(f, text="X", bg="red", fg="white", font=("Arial", 8, "bold"), width=3)
+            btn_del.pack(side=tk.LEFT, fill="y")
+            btn_del.bind("<Button-1>", lambda e, idx=i: self.remove_color(idx))
+            lbl = tk.Label(f, text=hex_c, bg=hex_c, fg=fg, font=("Consolas", 9, "bold"))
+            lbl.pack(side=tk.LEFT, expand=True)
+            spin = tk.Spinbox(f, from_=1, to=999, width=4, textvariable=var, font=("Arial", 10))
+            spin.pack(side=tk.RIGHT, padx=5)
+
+    def trigger_process(self, event=None):
+        if self.cv_original_full is None: return
+        self.lbl_status.config(text="Processing...")
+        self.progress['mode'] = 'indeterminate'
+        self.progress.start(10)
+        
+        # Snapshot config to avoid thread safety issues
+        snapshot_config = {
+            "max_width": self.config["max_width"].get(),
+            "max_colors": self.config["max_colors"].get(),
+            "denoise_strength": self.config["denoise_strength"].get(),
+            "min_blob_size": self.config["min_blob_size"].get(),
+            "orphaned_blobs": self.config["orphaned_blobs"].get()
+        }
+        
+        # Snapshot lists
+        snapshot_colors = list(self.picked_colors)
+        snapshot_layers = [v.get() for v in self.layer_vars]
+        
+        threading.Thread(target=self.process_thread, args=(self.cv_original_full, snapshot_config, snapshot_colors, snapshot_layers)).start()
+
+    def process_thread(self, img_original, config, picked_colors, layer_ids):
+        try:
+            img = img_original.copy()
+            max_w = config["max_width"]
+            h, w = img.shape[:2]
+            if max_w and w > max_w:
+                scale = max_w / w
+                img = cv2.resize(img, (max_w, int(h * scale)), interpolation=cv2.INTER_AREA)
+
+            denoise_val = config["denoise_strength"]
+            if denoise_val > 0:
+                k = denoise_val if denoise_val % 2 == 1 else denoise_val + 1
+                img = cv2.GaussianBlur(img, (k, k), 0)
+
+            h, w = img.shape[:2]
+            data = img.reshape((-1, 3)).astype(np.float32)
+
+            raw_masks = []
+            raw_centers = []
+            
+            # 1. Determine Colors (Auto vs Manual)
+            if len(picked_colors) > 0:
+                centers = np.array(picked_colors, dtype=np.float32)
+                distances = np.zeros((data.shape[0], len(centers)), dtype=np.float32)
+                for i, center in enumerate(centers):
+                    distances[:, i] = np.sum((data - center) ** 2, axis=1)
+                labels_reshaped = np.argmin(distances, axis=1).reshape((h, w))
+                raw_centers = np.uint8(centers)
+                num_raw_colors = len(centers)
+            else:
+                max_k = config["max_colors"]
+                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+                ret, label, center = cv2.kmeans(data, max_k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+                raw_centers = np.uint8(center)
+                labels_reshaped = label.flatten().reshape((h, w))
+                num_raw_colors = len(raw_centers)
+
+            # 2. Generate Raw Masks
+            for i in range(num_raw_colors):
+                mask = cv2.inRange(labels_reshaped, i, i)
+                raw_masks.append(mask)
+
+            final_masks = []
+            final_centers = []
+            total_coverage_mask = np.zeros((h, w), dtype=np.uint8) # Accumulator for optimization
+            
+            min_blob = config["min_blob_size"]
+            kernel = None
+            if denoise_val > 0:
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (denoise_val, denoise_val))
+
+            # 3. Merge & Filter Layers
+            if len(picked_colors) > 0:
+                # Group by Layer ID
+                layer_map = {} 
+                for idx, lid in enumerate(layer_ids):
+                    if lid not in layer_map: layer_map[lid] = []
+                    layer_map[lid].append(idx)
+                
+                sorted_layer_ids = sorted(layer_map.keys())
+                
+                for lid in sorted_layer_ids:
+                    indices = layer_map[lid]
+                    combined_mask = np.zeros((h, w), dtype=np.uint8)
+                    avg_color = np.zeros(3, dtype=np.float32)
+                    
+                    for idx in indices:
+                        combined_mask = cv2.bitwise_or(combined_mask, raw_masks[idx])
+                        avg_color += raw_centers[idx]
+                    
+                    avg_color = (avg_color / len(indices)).astype(np.uint8)
+                    
+                    if kernel is not None:
+                        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
+                        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
+                    
+                    # Optimize: Use raster filtering instead of vector filtering
+                    filtered = filter_small_blobs(combined_mask, min_blob)
+                    final_masks.append(filtered)
+                    final_centers.append(avg_color)
+                    
+                    # Accumulate coverage
+                    total_coverage_mask = cv2.bitwise_or(total_coverage_mask, filtered)
+
+            else:
+                # Auto Mode
+                for i, mask in enumerate(raw_masks):
+                    if kernel is not None:
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+                    
+                    filtered = filter_small_blobs(mask, min_blob)
+                    final_masks.append(filtered)
+                    
+                    # Accumulate coverage
+                    total_coverage_mask = cv2.bitwise_or(total_coverage_mask, filtered)
+                final_centers = raw_centers
+
+            # 4. Orphaned Blobs (Optimized)
+            if config["orphaned_blobs"]:
+                orphans = cv2.bitwise_not(total_coverage_mask)
+                
+                if kernel is not None:
+                    orphans = cv2.morphologyEx(orphans, cv2.MORPH_OPEN, kernel)
+                    orphans = cv2.morphologyEx(orphans, cv2.MORPH_CLOSE, kernel)
+
+                orphans_final = filter_small_blobs(orphans, min_blob)
+
+                if cv2.countNonZero(orphans_final) > 0:
+                    # Safety break for color picking to avoid infinite loop
+                    attempts = 0
+                    rand_c = np.array([0, 255, 0], dtype=np.uint8) # Default green if search fails
+                    
+                    while attempts < 50:
+                        attempts += 1
+                        candidate = np.random.randint(0, 256, 3).astype(np.uint8)
+                        dists = [np.sum((c - candidate)**2) for c in final_centers]
+                        
+                        # Adaptive threshold: if crowded (many layers), accept lower contrast
+                        threshold = 2000 if len(final_centers) < 10 else 500
+                        
+                        if not dists or min(dists) > threshold: 
+                            rand_c = candidate
+                            break
+                    
+                    final_masks.append(orphans_final)
+                    final_centers.append(rand_c)
+                    print("Added Orphaned Blobs layer.")
+
+            self.processed_data = {
+                "centers": final_centers,
+                "masks": final_masks,
+                "width": w,
+                "height": h
+            }
+            self.root.after(0, lambda: self._generate_previews(final_centers, final_masks, w, h))
+            self.root.after(0, self.update_ui_after_process)
+
+        except Exception as e:
+            print(e)
+            self.root.after(0, self.progress.stop)
+
+    def _generate_previews(self, centers, masks, w, h):
+        combined = np.ones((h, w, 3), dtype=np.uint8) * 255
+        for i, mask in enumerate(masks):
+            combined[mask == 255] = centers[i]
+        self.preview_images["All"] = Image.fromarray(cv2.cvtColor(combined, cv2.COLOR_BGR2RGB))
+        for i, mask in enumerate(masks):
+            layer = np.ones((h, w, 3), dtype=np.uint8) * 255
+            layer[mask == 255] = centers[i]
+            self.preview_images[i] = Image.fromarray(cv2.cvtColor(layer, cv2.COLOR_BGR2RGB))
+
+    def update_ui_after_process(self):
+        self.progress.stop()
+        self.progress['mode'] = 'determinate'
+        self.progress_var.set(100)
+        self.lbl_status.config(text="Processing Complete.")
+        for tab in self.notebook.tabs():
+            if tab != str(self.tab_main): self.notebook.forget(tab)
+        self._add_tab("Combined Result", self.preview_images["All"])
+        centers = self.processed_data["centers"]
+        for i in range(len(centers)):
+            hex_c = bgr_to_hex(centers[i])
+            self._add_tab(f"L{i+1} {hex_c}", self.preview_images[i])
+        self.notebook.select(1)
+
+    def _add_tab(self, title, pil_image):
+        frame = tk.Frame(self.notebook, bg="#333")
+        self.notebook.add(frame, text=title)
+        canvas = AutoResizingCanvas(frame, pil_image=pil_image, bg="#333", highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+    def export_bundle_2d(self, event=None):
+        if not self.processed_data: return
+        # Update directory from dialog
+        target_dir = filedialog.askdirectory(initialdir=self.last_opened_dir)
+        if not target_dir: return
+        self.last_opened_dir = target_dir # Remember this dir
+        
+        self.progress['mode'] = 'determinate'
+        self.progress_var.set(0)
+        threading.Thread(target=self.export_2d_thread, args=(target_dir,)).start()
+
+    def export_2d_thread(self, target_dir):
+        try:
+            centers = self.processed_data["centers"]
+            masks = self.processed_data["masks"]
+            width = self.processed_data["width"]
+            height = self.processed_data["height"]
+            tmpl = self.config["filename_template"].get()
+            smooth = self.config["smoothing"].get() 
+            
+            for i in range(len(centers)):
+                self.progress_var.set(((i+1)/len(centers))*100)
+                bgr = centers[i]
+                hex_c = bgr_to_hex(bgr)
+                fname = tmpl.replace("%INPUTFILENAME%", self.current_base_name).replace("%COLOR%", hex_c.replace("#","")).replace("%INDEX%", str(i+1))
+                if not fname.endswith(".svg"): fname += ".svg"
+                path = os.path.join(target_dir, fname)
+                
+                dwg = svgwrite.Drawing(path, profile='tiny', size=(width, height))
+                contours, _ = cv2.findContours(masks[i], cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for c in contours:
+                    epsilon = smooth * cv2.arcLength(c, True)
+                    approx = cv2.approxPolyDP(c, epsilon, True)
+                    if len(approx) < 3: continue
+                    pts = approx.squeeze().tolist()
+                    if not pts: continue
+                    if isinstance(pts[0], int): d = f"M {pts[0]},{pts[1]} "
+                    else:
+                        d = f"M {pts[0][0]},{pts[0][1]} "
+                        for p in pts[1:]: d += f"L {p[0]},{p[1]} "
+                    d += "Z "
+                    dwg.add(dwg.path(d=d, fill=hex_c, stroke='none'))
+                dwg.save()
+            self.root.after(0, lambda: messagebox.showinfo("Success", "2D Export Complete"))
+        except Exception as e:
+            print(e)
+            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+
+    def apply_stencil_bridges(self, polys, bridge_width):
+        """
+        Iterates through polygons. If a polygon has a hole (interior),
+        it creates a bridge (cut) connecting the interior to the exterior,
+        anchoring the island to the main frame.
+        """
+        bridged_polys = []
+        
+        for poly in polys:
+            if not poly.is_valid: poly = poly.buffer(0)
+            
+            # If the polygon has no holes, it's safe (no floating islands)
+            if len(poly.interiors) == 0:
+                bridged_polys.append(poly)
+                continue
+
+            # It has holes! We need to anchor the islands inside.
+            temp_poly = poly
+            
+            for interior in poly.interiors:
+                # 1. Find the shortest distance between the inner island and the outer frame
+                p1, p2 = nearest_points(temp_poly.exterior, interior)
+                
+                # 2. Create a line connecting them
+                bridge_line = LineString([p1, p2])
+                
+                # 3. Thicken the line into a rectangle (The Bridge)
+                bridge_shape = bridge_line.buffer(bridge_width / 2)
+                
+                # 4. Subtract the bridge from the polygon (Cutting the ring)
+                try:
+                    temp_poly = temp_poly.difference(bridge_shape)
+                    if not temp_poly.is_valid: temp_poly = temp_poly.buffer(0)
+                except Exception as e:
+                    print(f"Bridge failed on one island: {e}")
+            
+            # Handle case where difference returns a MultiPolygon (if we cut it in half)
+            if isinstance(temp_poly, MultiPolygon):
+                for geom in temp_poly.geoms:
+                    bridged_polys.append(geom)
+            else:
+                bridged_polys.append(temp_poly)
+                
+        return bridged_polys
+
+    def export_3d_thread(self, target_dir):
+        try:
+            centers = self.processed_data["centers"]
+            masks = self.processed_data["masks"]
+            orig_w = self.processed_data["width"]
+            orig_h = self.processed_data["height"]
+            tmpl = self.config["filename_template"].get()
+            smooth = self.config["smoothing"].get() 
+
+            target_w = self.exp_width.get()
+            extrusion = self.exp_height.get()
+            border_w = self.exp_border.get()
+            is_stencil = self.exp_invert.get()
+            
+            scale = target_w / orig_w
+            target_h = orig_h * scale
+            
+            for i in range(len(centers)):
+                self.progress_var.set(((i+1)/len(centers))*100)
+                bgr = centers[i]
+                hex_c = bgr_to_hex(bgr)
+                
+                fname = tmpl.replace("%INPUTFILENAME%", self.current_base_name).replace("%COLOR%", hex_c.replace("#","")).replace("%INDEX%", str(i+1))
+                if is_stencil: fname += "_stencil"
+                fname += ".stl"
+                full_path = os.path.join(target_dir, fname)
+                
+                contours, hierarchy = cv2.findContours(masks[i], cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+                shapely_polys = []
+                
+                if hierarchy is not None:
+                    hierarchy = hierarchy[0]
+                    for j, c in enumerate(contours):
+                        if hierarchy[j][3] == -1: 
+                            epsilon = smooth * cv2.arcLength(c, True)
+                            approx = cv2.approxPolyDP(c, epsilon, True)
+                            if len(approx) < 3: continue
+                            
+                            outer_pts = approx.squeeze() * scale
+                            outer_pts[:, 1] = target_h - outer_pts[:, 1] 
+                            
+                            holes = []
+                            current_child_idx = hierarchy[j][2]
+                            while current_child_idx != -1:
+                                child_c = contours[current_child_idx]
+                                eps_child = smooth * cv2.arcLength(child_c, True)
+                                approx_child = cv2.approxPolyDP(child_c, eps_child, True)
+                                if len(approx_child) >= 3:
+                                    hole_pts = approx_child.squeeze() * scale
+                                    hole_pts[:, 1] = target_h - hole_pts[:, 1]
+                                    holes.append(hole_pts)
+                                current_child_idx = hierarchy[current_child_idx][0]
+                            
+                            try:
+                                poly = Polygon(shell=outer_pts, holes=holes)
+                                clean_poly = poly.buffer(0)
+                                if clean_poly.is_empty: continue
+                                shapely_polys.append(clean_poly)
+                            except: pass
+
+                # --- APPLY BRIDGES (ISLAND FIX) ---
+                if is_stencil:
+                     bridge_w = self.exp_bridge.get()
+                     if bridge_w > 0:
+                         shapely_polys = self.apply_stencil_bridges(shapely_polys, bridge_w)
+                # ----------------------------------
+
+                scene_mesh = trimesh.Trimesh()
+
+                if is_stencil:
+                    min_x, min_y = -border_w, -border_w
+                    max_x, max_y = target_w + border_w, target_h + border_w
+                    plate_poly = Polygon([(min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)])
+                    
+                    final_shape = plate_poly
+                    if shapely_polys:
+                        try:
+                            blobs = unary_union(shapely_polys)
+                            final_shape = plate_poly.difference(blobs)
+                        except Exception as e:
+                            print(f"Boolean diff failed: {e}")
+
+                    polys_to_extrude = []
+                    if isinstance(final_shape, MultiPolygon):
+                        for geom in final_shape.geoms: polys_to_extrude.append(geom)
+                    else:
+                        polys_to_extrude.append(final_shape)
+                        
+                    for p in polys_to_extrude:
+                        if not p.is_valid: p = p.buffer(0)
+                        if p.is_empty: continue
+                        mesh_part = trimesh.creation.extrude_polygon(p, height=extrusion)
+                        scene_mesh += mesh_part
+
+                else:
+                    if shapely_polys:
+                        combined_poly = unary_union(shapely_polys)
+                        polys_to_extrude = []
+                        if isinstance(combined_poly, MultiPolygon):
+                            for geom in combined_poly.geoms: polys_to_extrude.append(geom)
+                        else:
+                            polys_to_extrude.append(combined_poly)
+                        
+                        for p in polys_to_extrude:
+                            if not p.is_valid: p = p.buffer(0)
+                            if p.is_empty: continue
+                            mesh_part = trimesh.creation.extrude_polygon(p, height=extrusion)
+                            scene_mesh += mesh_part
+
+                    if border_w > 0:
+                        outer_box = [[-border_w, -border_w], [target_w + border_w, -border_w],
+                                     [target_w + border_w, target_h + border_w], [-border_w, target_h + border_w]]
+                        inner_box = [[0, 0], [target_w, 0], [target_w, target_h], [0, target_h]]
+                        border_poly = Polygon(shell=outer_box, holes=[inner_box])
+                        border_mesh = trimesh.creation.extrude_polygon(border_poly, height=extrusion)
+                        scene_mesh += border_mesh
+
+                if not scene_mesh.is_empty:
+                    scene_mesh.export(full_path)
+            
+            self.root.after(0, lambda: messagebox.showinfo("Success", f"Exported 3D models to {target_dir}"))
+            self.root.after(0, lambda: self.lbl_status.config(text="3D Export Complete."))
+            
+        except Exception as e:
+            print(e)
+            err_msg = str(e)
+            self.root.after(0, lambda: messagebox.showerror("Export Error", err_msg))
+            self.root.after(0, self.progress.stop)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = CamoStudioApp(root)
+    root.mainloop()
