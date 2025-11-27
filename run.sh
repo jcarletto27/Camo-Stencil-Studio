@@ -3,7 +3,7 @@
 # 0. Auto-Update Check
 if command -v git &> /dev/null; then
     echo "[*] Checking for updates..."
-    git pull origin main
+#    git pull origin main
 else
     echo "[!] Git not found. Skipping update check."
 fi
