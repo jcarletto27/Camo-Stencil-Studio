@@ -740,7 +740,7 @@ class CamoStudioApp:
             h, w = img.shape[:2]
             if max_w and w > max_w:
                 scale = max_w / w
-                img = cv2.resize(img, (max_w, int(h * scale)), interpolation=cv2.INTER_AREA)
+                img = cv2.resize(img, (max_width, int(h * scale)), interpolation=cv2.INTER_AREA)
 
             denoise_val = config["denoise_strength"]
             if denoise_val > 0:
@@ -961,9 +961,19 @@ class CamoStudioApp:
         """
         bridged_polys = []
         
+        # 1. Flatten the list to ensure we only process Polygons, not MultiPolygons
+        flat_polys = []
         for poly in polys:
             if not poly.is_valid: poly = poly.buffer(0)
             
+            # If buffer(0) created a MultiPolygon, split it into separate Polygons
+            if isinstance(poly, MultiPolygon):
+                flat_polys.extend(list(poly.geoms))
+            else:
+                flat_polys.append(poly)
+                
+        # 2. Process the flattened list of pure Polygons
+        for poly in flat_polys:
             # If the polygon has no holes, it's safe (no floating islands)
             if len(poly.interiors) == 0:
                 bridged_polys.append(poly)
