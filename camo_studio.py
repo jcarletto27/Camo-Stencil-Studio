@@ -14,7 +14,7 @@ from shapely.geometry import Polygon, MultiPolygon, LineString
 from shapely.ops import unary_union, nearest_points
 
 # --- DEFAULTS ---
-DEFAULT_MAX_COLORS = 3
+DEFAULT_MAX_COLORS = 4
 DEFAULT_MAX_WIDTH = 4096
 DEFAULT_SMOOTHING = 0.0001 
 DEFAULT_DENOISE = 3
@@ -102,9 +102,9 @@ class CamoStudioApp:
         # 3D Export Vars
         self.exp_units = tk.StringVar(value="mm")
         self.exp_width = tk.DoubleVar(value=100.0)
-        self.exp_height = tk.DoubleVar(value=2.0) 
-        self.exp_border = tk.DoubleVar(value=5.0)
-        self.exp_bridge = tk.DoubleVar(value=2.0)
+        self.exp_height = tk.DoubleVar(value=.25) 
+        self.exp_border = tk.DoubleVar(value=2.5)
+        self.exp_bridge = tk.DoubleVar(value=1.0)
         self.exp_invert = tk.BooleanVar(value=True)
         
         # --- 3. Load Persistent Settings ---
